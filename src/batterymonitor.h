@@ -89,6 +89,12 @@ private:
     int readSysfsInt(const QString &filename) const;
     QString findPowerSupplyPath() const;
 
+    // Software coulomb counting fallback
+    void coulombAccumulate();
+    void coulombReset();
+    void coulombTryEstimate();
+    bool m_chargeFullAvailable;
+
     QString m_configDir;
     QString m_powerSupplyPath;
     int m_level;
@@ -116,6 +122,12 @@ private:
     QVector<qint64> m_healthTimestamps; // timestamps of health samples
     QVector<int> m_healthSamples;       // charge_full values (µAh) at those times
     static const int MAX_HEALTH_SAMPLES = 200; // ~400 days of 2/day samples
+
+    // Software coulomb counting fallback (active when charge_full unavailable)
+    double m_coulombAccUah;      // accumulated discharge in µAh (positive = discharged)
+    int m_coulombStartSoc;       // SoC% when accumulation started
+    qint64 m_coulombLastMs;      // timestamp (ms) of last accumulation step
+    int m_coulombEstimateCount;  // how many fallback estimates produced
 };
 
 #endif // BATTERYMONITOR_H

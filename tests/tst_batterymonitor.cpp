@@ -46,6 +46,16 @@ private slots:
     void testHealthConfidenceLevels();
     void testHealthInfoJson();
 
+    // Coulomb counting fallback tests
+    void testCoulombFallbackActivatesWhenChargeFullMissing();
+    void testCoulombAccumulationDuringDischarge();
+    void testCoulombEstimateProduced();
+    void testCoulombResetOnCharging();
+    void testCoulombIgnoredWhenChargeFullAvailable();
+    void testCoulombSanityCheckRejectsOutliers();
+    void testCoulombPersistence();
+    void testCoulombSkipsLargeGaps();
+
 private:
     void createMockSysfs(const QString &path, int capacity, const QString &status);
     void createMockHealthSysfs(const QString &path, int capacity, const QString &status,
@@ -735,6 +745,220 @@ void TestBatteryMonitor::testHealthInfoJson()
     QJsonArray hist = info["history"].toArray();
     QCOMPARE(hist.size(), 1);
     QCOMPARE(hist[0].toObject()["mah"].toInt(), 350);
+}
+
+void TestBatteryMonitor::testCoulombFallbackActivatesWhenChargeFullMissing()
+{
+    // Create sysfs with charge_full = 0 (unavailable) but charge_full_design present
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    createMockHealthSysfs(mockBatteryPath, 80, "Discharging",
+                          0, 430000,       // charge_full=0 (unavailable), design=430mAh
+                          3800000, -80000,  // voltage, current
+                          270, 0);          // temp, cycles
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+
+    monitor.readBatteryLevel();
+    monitor.readBatteryHealth();
+
+    // charge_full was 0, so m_chargeFullAvailable should be false
+    QCOMPARE(monitor.m_chargeFullAvailable, false);
+    QCOMPARE(monitor.m_designCapacityUah, 430000);
+
+    // No learned capacity from hardware
+    QCOMPARE(monitor.m_learnedCapacityUah, 0);
+}
+
+void TestBatteryMonitor::testCoulombAccumulationDuringDischarge()
+{
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    createMockHealthSysfs(mockBatteryPath, 80, "Discharging",
+                          0, 430000,
+                          3800000, -80000,  // -80mA discharge
+                          270, 0);
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+    monitor.m_chargeFullAvailable = false;
+    monitor.m_designCapacityUah = 430000;
+    monitor.m_level = 80;
+    monitor.m_charging = false;
+
+    // Simulate first accumulation call (initializes start state)
+    monitor.coulombAccumulate();
+    QCOMPARE(monitor.m_coulombStartSoc, 80);
+    QVERIFY(monitor.m_coulombLastMs > 0);
+    QCOMPARE(monitor.m_coulombAccUah, 0.0);
+
+    // Simulate a second call 2 minutes later
+    // Manually set the last timestamp back by 120 seconds
+    monitor.m_coulombLastMs = QDateTime::currentMSecsSinceEpoch() - 120000;
+    monitor.coulombAccumulate();
+
+    // 80mA * (120s / 3600s) = 2.667 mAh = ~2667 µAh
+    QVERIFY(monitor.m_coulombAccUah > 2000);
+    QVERIFY(monitor.m_coulombAccUah < 3500);
+}
+
+void TestBatteryMonitor::testCoulombEstimateProduced()
+{
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_designCapacityUah = 430000;
+    monitor.m_chargeFullAvailable = false;
+
+    // Simulate a discharge from 90% to 50% (40% span, above 30% threshold)
+    // with accumulated discharge of 172 mAh (= 172000 µAh)
+    // Expected capacity: 172000 * 100 / 40 = 430000 µAh = 430 mAh
+    monitor.m_coulombStartSoc = 90;
+    monitor.m_coulombAccUah = 172000.0; // 172 mAh
+    monitor.m_level = 50;
+
+    monitor.coulombTryEstimate();
+
+    // Should have produced an estimate and fed it into EMA
+    QCOMPARE(monitor.m_emaSampleCount, 1);
+    QCOMPARE(monitor.m_coulombEstimateCount, 1);
+
+    // The estimate should be ~430 mAh
+    int learnedMah = monitor.learnedCapacityMah();
+    QVERIFY(learnedMah >= 425 && learnedMah <= 435);
+
+    // Health should be ~100%
+    int health = monitor.healthPercent();
+    QVERIFY(health >= 98 && health <= 102);
+
+    // Accumulator should have been reset for next window
+    QCOMPARE(monitor.m_coulombStartSoc, 50);
+    QCOMPARE(monitor.m_coulombAccUah, 0.0);
+}
+
+void TestBatteryMonitor::testCoulombResetOnCharging()
+{
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_chargeFullAvailable = false;
+    monitor.m_coulombStartSoc = 70;
+    monitor.m_coulombAccUah = 50000.0;
+    monitor.m_coulombLastMs = QDateTime::currentMSecsSinceEpoch();
+
+    // Simulate transition from discharging to charging
+    monitor.m_charging = false;
+    bool prevCharging = monitor.m_charging;
+
+    // Now charging starts
+    monitor.m_charging = true;
+    if (monitor.m_charging && !prevCharging) {
+        monitor.coulombReset();
+    }
+
+    QCOMPARE(monitor.m_coulombStartSoc, -1);
+    QCOMPARE(monitor.m_coulombAccUah, 0.0);
+    QCOMPARE(monitor.m_coulombLastMs, static_cast<qint64>(0));
+}
+
+void TestBatteryMonitor::testCoulombIgnoredWhenChargeFullAvailable()
+{
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    // charge_full IS available (360000 µAh)
+    createMockHealthSysfs(mockBatteryPath, 70, "Discharging",
+                          360000, 430000,
+                          3700000, -90000,
+                          270, 50);
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+
+    monitor.readBatteryLevel();
+    monitor.readBatteryHealth();
+
+    // charge_full was available, so hardware path should be used
+    QCOMPARE(monitor.m_chargeFullAvailable, true);
+    QCOMPARE(monitor.m_learnedCapacityUah, 360000);
+    QCOMPARE(monitor.m_emaSampleCount, 1);
+
+    // Coulomb estimator should not have been triggered
+    QCOMPARE(monitor.m_coulombEstimateCount, 0);
+}
+
+void TestBatteryMonitor::testCoulombSanityCheckRejectsOutliers()
+{
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_designCapacityUah = 430000;
+    monitor.m_chargeFullAvailable = false;
+
+    // Simulate a wildly wrong accumulation: 500 mAh discharged in 40% SoC drop
+    // would give 1250 mAh capacity — way over 2x design (860 mAh), should reject
+    monitor.m_coulombStartSoc = 90;
+    monitor.m_coulombAccUah = 500000.0;
+    monitor.m_level = 50;
+
+    monitor.coulombTryEstimate();
+
+    // Should NOT have produced an estimate
+    QCOMPARE(monitor.m_emaSampleCount, 0);
+    QCOMPARE(monitor.m_coulombEstimateCount, 0);
+
+    // Accumulator should have been reset
+    QCOMPARE(monitor.m_coulombStartSoc, -1);
+    QCOMPARE(monitor.m_coulombAccUah, 0.0);
+}
+
+void TestBatteryMonitor::testCoulombPersistence()
+{
+    // Save coulomb state
+    {
+        BatteryMonitor monitor(m_configDir);
+        monitor.m_designCapacityUah = 430000;
+        monitor.m_chargeFullAvailable = false;
+        monitor.m_coulombAccUah = 85000.0;
+        monitor.m_coulombStartSoc = 75;
+        monitor.m_coulombEstimateCount = 3;
+
+        // Need at least one EMA sample or design capacity so save triggers
+        monitor.updateLearnedCapacity(400000);
+        monitor.saveHealthData();
+    }
+
+    // Load it back
+    {
+        BatteryMonitor monitor(m_configDir);
+        // loadHealthData is called in constructor
+
+        QCOMPARE(monitor.m_coulombStartSoc, 75);
+        QVERIFY(qAbs(monitor.m_coulombAccUah - 85000.0) < 1.0);
+        QCOMPARE(monitor.m_coulombEstimateCount, 3);
+        QCOMPARE(monitor.m_chargeFullAvailable, false);
+    }
+}
+
+void TestBatteryMonitor::testCoulombSkipsLargeGaps()
+{
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    createMockHealthSysfs(mockBatteryPath, 70, "Discharging",
+                          0, 430000,
+                          3700000, -80000,
+                          270, 0);
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+    monitor.m_chargeFullAvailable = false;
+    monitor.m_level = 70;
+    monitor.m_charging = false;
+
+    // First call sets start point
+    monitor.coulombAccumulate();
+    QCOMPARE(monitor.m_coulombStartSoc, 70);
+    double accBefore = monitor.m_coulombAccUah;
+
+    // Simulate a 15-minute gap (>COULOMB_MAX_GAP_MS=10min)
+    // This models CPU suspend — we should skip this interval, not accumulate
+    monitor.m_coulombLastMs = QDateTime::currentMSecsSinceEpoch() - 900000; // 15 min ago
+    monitor.coulombAccumulate();
+
+    // Accumulator should NOT have increased — the gap was skipped
+    QCOMPARE(monitor.m_coulombAccUah, accBefore);
+    // But timestamp should have been updated
+    QVERIFY(monitor.m_coulombLastMs > QDateTime::currentMSecsSinceEpoch() - 1000);
 }
 
 QTEST_MAIN(TestBatteryMonitor)

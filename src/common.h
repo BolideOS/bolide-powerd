@@ -21,4 +21,8 @@
 #define BATTERY_POLL_IDLE_MS    120000  // 2 minutes during idle
 #define BATTERY_POLL_ACTIVE_MS   30000  // 30 seconds during workout
 
+// Software coulomb counting fallback
+#define COULOMB_MIN_SOC_SPAN    30      // minimum SoC% drop to produce an estimate
+#define COULOMB_MAX_GAP_MS      600000  // 10 min: discard accumulator if gap exceeds this
+
 #endif // COMMON_H

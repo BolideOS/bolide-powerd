@@ -30,6 +30,11 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
     , m_cycleCount(0)
     , m_emaCapacityUah(0.0)
     , m_emaSampleCount(0)
+    , m_coulombAccUah(0.0)
+    , m_coulombStartSoc(-1)
+    , m_coulombLastMs(0)
+    , m_coulombEstimateCount(0)
+    , m_chargeFullAvailable(false)
 {
     m_powerSupplyPath = findPowerSupplyPath();
     
@@ -306,6 +311,17 @@ void BatteryMonitor::pollBattery()
 
     readBatteryLevel();
 
+    // Software coulomb counting: accumulate current during discharge
+    // when hardware charge_full is not available
+    if (!m_chargeFullAvailable && !m_charging) {
+        coulombAccumulate();
+    }
+
+    // Reset accumulator when charging starts (a new discharge cycle)
+    if (m_charging && !prevCharging) {
+        coulombReset();
+    }
+
     if (m_level != prevLevel) {
         emit levelChanged(m_level);
     }
@@ -392,8 +408,13 @@ void BatteryMonitor::readBatteryHealth()
     // Read current learned capacity (µAh) — updated by fuel gauge
     int chargeFullUah = readSysfsInt("charge_full");
     if (chargeFullUah > 0) {
+        m_chargeFullAvailable = true;
         m_learnedCapacityUah = chargeFullUah;
         updateLearnedCapacity(chargeFullUah);
+    } else {
+        // Hardware charge_full not available — try software estimate
+        m_chargeFullAvailable = false;
+        coulombTryEstimate();
     }
 
     // Instantaneous readings
@@ -435,6 +456,86 @@ void BatteryMonitor::updateLearnedCapacity(int chargeFullUah)
     }
 }
 
+void BatteryMonitor::coulombAccumulate()
+{
+    // Read current_now (µA) — skip if not available
+    int currentUa = readSysfsInt("current_now");
+    if (currentUa == 0)
+        return;
+
+    qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+    // First sample of this discharge cycle: just record the starting point
+    if (m_coulombStartSoc < 0) {
+        m_coulombStartSoc = m_level;
+        m_coulombLastMs = nowMs;
+        m_coulombAccUah = 0.0;
+        return;
+    }
+
+    qint64 dtMs = nowMs - m_coulombLastMs;
+
+    // If the gap is too large (>10min), the CPU was likely suspended.
+    // We can't account for discharge during sleep so just advance the
+    // timestamp and keep going — the current samples we DO have are still
+    // valid for the intervals we measured them.
+    if (dtMs <= 0 || dtMs > COULOMB_MAX_GAP_MS) {
+        m_coulombLastMs = nowMs;
+        return;
+    }
+
+    // Integrate: I(µA) * dt(ms) / 3,600,000 = µAh
+    // current_now is negative during discharge on most drivers, take abs
+    double dischargedUah = qAbs(currentUa) * (dtMs / 3600000.0);
+    m_coulombAccUah += dischargedUah;
+    m_coulombLastMs = nowMs;
+}
+
+void BatteryMonitor::coulombReset()
+{
+    m_coulombAccUah = 0.0;
+    m_coulombStartSoc = -1;
+    m_coulombLastMs = 0;
+}
+
+void BatteryMonitor::coulombTryEstimate()
+{
+    if (m_coulombStartSoc < 0 || m_coulombAccUah <= 0)
+        return;
+
+    // Need design capacity to compute health %
+    if (m_designCapacityUah <= 0)
+        return;
+
+    int socDrop = m_coulombStartSoc - m_level;
+    if (socDrop < COULOMB_MIN_SOC_SPAN)
+        return; // not enough span yet
+
+    // Estimate full capacity: accumulatedUah / (socDrop / 100)
+    double estimatedCapacityUah = m_coulombAccUah * 100.0 / socDrop;
+
+    // Sanity check: should be within 30%-200% of design capacity
+    if (estimatedCapacityUah < m_designCapacityUah * 0.3 ||
+        estimatedCapacityUah > m_designCapacityUah * 2.0) {
+        qWarning() << "BatteryMonitor: Coulomb estimate out of range:"
+                    << qRound(estimatedCapacityUah / 1000.0) << "mAh, discarding";
+        coulombReset();
+        return;
+    }
+
+    qInfo() << "BatteryMonitor: Software coulomb estimate:"
+            << qRound(estimatedCapacityUah / 1000.0) << "mAh"
+            << "(SoC" << m_coulombStartSoc << "% ->" << m_level << "%,"
+            << qRound(m_coulombAccUah / 1000.0) << "mAh discharged)";
+
+    m_coulombEstimateCount++;
+    updateLearnedCapacity(qRound(estimatedCapacityUah));
+
+    // Reset for the next accumulation window — continue from current level
+    m_coulombStartSoc = m_level;
+    m_coulombAccUah = 0.0;
+}
+
 void BatteryMonitor::loadHealthData()
 {
     QString path = m_configDir + "/" + QString::fromLatin1(POWERD_HEALTH_FILE);
@@ -468,18 +569,30 @@ void BatteryMonitor::loadHealthData()
 
     if (m_emaCapacityUah > 0 && m_emaSampleCount > 0)
         m_learnedCapacityUah = qRound(m_emaCapacityUah);
+
+    // Restore coulomb counting fallback state
+    m_coulombAccUah = obj.value(QLatin1String("coulomb_acc_uah")).toDouble(0.0);
+    m_coulombStartSoc = obj.value(QLatin1String("coulomb_start_soc")).toInt(-1);
+    m_coulombEstimateCount = obj.value(QLatin1String("coulomb_estimates")).toInt(0);
+    m_chargeFullAvailable = obj.value(QLatin1String("charge_full_available")).toBool(false);
 }
 
 void BatteryMonitor::saveHealthData()
 {
     // Only save if we have actual data
-    if (m_emaSampleCount == 0 && m_designCapacityUah == 0)
+    if (m_emaSampleCount == 0 && m_designCapacityUah == 0 && m_coulombEstimateCount == 0)
         return;
 
     QJsonObject obj;
     obj[QLatin1String("design_uah")] = m_designCapacityUah;
     obj[QLatin1String("ema_uah")] = m_emaCapacityUah;
     obj[QLatin1String("ema_count")] = m_emaSampleCount;
+
+    // Coulomb counting fallback state
+    obj[QLatin1String("coulomb_acc_uah")] = m_coulombAccUah;
+    obj[QLatin1String("coulomb_start_soc")] = m_coulombStartSoc;
+    obj[QLatin1String("coulomb_estimates")] = m_coulombEstimateCount;
+    obj[QLatin1String("charge_full_available")] = m_chargeFullAvailable;
 
     QJsonArray samples;
     int count = qMin(m_healthTimestamps.size(), m_healthSamples.size());
