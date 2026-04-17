@@ -17,6 +17,16 @@ DBusInterface::DBusInterface(ProfileManager *pm, BatteryMonitor *bm)
             this, &DBusInterface::onProfileManagerActiveProfileChanged);
     connect(m_profileManager, &ProfileManager::profilesChanged,
             this, &DBusInterface::onProfileManagerProfilesChanged);
+
+    // Forward battery health changes
+    if (m_batteryMonitor) {
+        connect(m_batteryMonitor, &BatteryMonitor::healthChanged, this, [this]() {
+            emit BatteryHealthChanged(
+                m_batteryMonitor->healthPercent(),
+                m_batteryMonitor->learnedCapacityMah(),
+                m_batteryMonitor->designCapacityMah());
+        });
+    }
 }
 
 QString DBusInterface::GetProfiles()
@@ -287,6 +297,19 @@ QString DBusInterface::GetBatteryPrediction()
     return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
 }
 
+QString DBusInterface::GetBatteryHealth()
+{
+    if (!m_batteryMonitor) {
+        QJsonObject obj;
+        obj[QLatin1String("health_percent")] = -1;
+        obj[QLatin1String("confidence")] = QLatin1String("unavailable");
+        QJsonDocument doc(obj);
+        return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+    }
+    QJsonDocument doc(m_batteryMonitor->healthInfo());
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
 QString DBusInterface::GetCurrentState()
 {
     QJsonObject state;
@@ -296,6 +319,11 @@ QString DBusInterface::GetCurrentState()
     if (m_batteryMonitor) {
         battery[QLatin1String("level")] = m_batteryMonitor->level();
         battery[QLatin1String("charging")] = m_batteryMonitor->charging();
+        battery[QLatin1String("health_percent")] = m_batteryMonitor->healthPercent();
+        battery[QLatin1String("learned_capacity_mah")] = m_batteryMonitor->learnedCapacityMah();
+        battery[QLatin1String("design_capacity_mah")] = m_batteryMonitor->designCapacityMah();
+        battery[QLatin1String("cycle_count")] = m_batteryMonitor->cycleCount();
+        battery[QLatin1String("health_confidence")] = m_batteryMonitor->healthConfidence();
     }
     state[QLatin1String("battery")] = battery;
 

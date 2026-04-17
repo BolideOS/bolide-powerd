@@ -6,12 +6,17 @@
 #include <QVector>
 #include <QTimer>
 #include <QJsonObject>
+#include <QJsonArray>
 
 class BatteryMonitor : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(int level READ level NOTIFY levelChanged)
     Q_PROPERTY(bool charging READ charging NOTIFY chargingChanged)
+    Q_PROPERTY(int healthPercent READ healthPercent NOTIFY healthChanged)
+    Q_PROPERTY(int learnedCapacityMah READ learnedCapacityMah NOTIFY healthChanged)
+    Q_PROPERTY(int designCapacityMah READ designCapacityMah NOTIFY healthChanged)
+    Q_PROPERTY(int cycleCount READ cycleCount NOTIFY healthChanged)
 
     friend class TestBatteryMonitor;
     friend class TestDBusInterface;
@@ -25,6 +30,15 @@ public:
 
     int level() const;
     bool charging() const;
+    int healthPercent() const;
+    int learnedCapacityMah() const;
+    int designCapacityMah() const;
+    int cycleCount() const;
+    int voltageNowMv() const;
+    int currentNowMa() const;
+    int temperatureDeci() const;
+    QString healthConfidence() const;
+    QJsonObject healthInfo() const;
 
     struct BatteryEntry {
         qint64 timestamp;
@@ -52,6 +66,7 @@ signals:
     void levelChanged(int level);
     void chargingChanged(bool charging);
     void significantChange(int level, bool charging);
+    void healthChanged();
 
 public slots:
     void setActiveProfile(const QString &profileId);
@@ -63,10 +78,15 @@ private slots:
 
 private:
     void readBatteryLevel();
+    void readBatteryHealth();
     void recordEntry();
     void loadHistory();
     void saveHistory();
+    void loadHealthData();
+    void saveHealthData();
+    void updateLearnedCapacity(int chargeFullUah);
     void trimHistory();
+    int readSysfsInt(const QString &filename) const;
     QString findPowerSupplyPath() const;
 
     QString m_configDir;
@@ -81,6 +101,21 @@ private:
     QVector<BatteryEntry> m_history;
     QTimer *m_pollTimer;
     QTimer *m_heartbeatTimer;
+
+    // Battery health tracking
+    int m_designCapacityUah;     // charge_full_design in µAh (0 = unavailable)
+    int m_learnedCapacityUah;    // latest charge_full in µAh
+    int m_voltageNowUv;          // voltage_now in µV
+    int m_currentNowUa;          // current_now in µA
+    int m_temperatureDeci;       // temp in 0.1°C
+    int m_cycleCount;            // cycle_count
+
+    // Exponential moving average for smoothing
+    double m_emaCapacityUah;     // smoothed learned capacity
+    int m_emaSampleCount;        // number of samples averaged
+    QVector<qint64> m_healthTimestamps; // timestamps of health samples
+    QVector<int> m_healthSamples;       // charge_full values (µAh) at those times
+    static const int MAX_HEALTH_SAMPLES = 200; // ~400 days of 2/day samples
 };
 
 #endif // BATTERYMONITOR_H

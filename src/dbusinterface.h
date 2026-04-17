@@ -35,6 +35,7 @@ public Q_SLOTS:
     // Battery telemetry
     QString GetBatteryHistory(int hours);
     QString GetBatteryPrediction();
+    QString GetBatteryHealth();
     QString GetCurrentState();
 
 Q_SIGNALS:
@@ -43,6 +44,7 @@ Q_SIGNALS:
     void WorkoutStarted(const QString &workoutType, const QString &profileId);
     void WorkoutStopped();
     void BatteryLevelChanged(int level, bool charging);
+    void BatteryHealthChanged(int healthPercent, int learnedMah, int designMah);
 
 private Q_SLOTS:
     void onProfileManagerActiveProfileChanged(const QString &id, const QString &name);

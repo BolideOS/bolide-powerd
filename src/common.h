@@ -11,6 +11,7 @@
 #define POWERD_PROFILES_FILE "profiles.json"
 #define POWERD_SETTINGS_FILE "settings.json"
 #define POWERD_BATTERY_FILE  "battery_history.bin"
+#define POWERD_HEALTH_FILE   "battery_health.json"
 #define POWERD_DEFAULT_PROFILES_PATH "/usr/share/asteroid-powerd/default-profiles.json"
 
 // Defaults

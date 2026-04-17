@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include "batterymonitor.h"
 #include "common.h"
 
@@ -37,8 +38,19 @@ private slots:
     void testWorkoutPollSwitch();
     void testPredictionNoVectorCopy();
 
+    // Battery health tests
+    void testHealthReadFromSysfs();
+    void testHealthUnavailableWithoutSysfs();
+    void testHealthEmaSmoothing();
+    void testHealthPersistence();
+    void testHealthConfidenceLevels();
+    void testHealthInfoJson();
+
 private:
     void createMockSysfs(const QString &path, int capacity, const QString &status);
+    void createMockHealthSysfs(const QString &path, int capacity, const QString &status,
+                               int chargeFullUah, int chargeFullDesignUah,
+                               int voltageUv, int currentUa, int tempDeci, int cycles);
     QTemporaryDir *m_tempDir;
     QString m_configDir;
     QString m_mockSysfsDir;
@@ -89,6 +101,26 @@ void TestBatteryMonitor::createMockSysfs(const QString &path, int capacity, cons
     QVERIFY(statusFile.open(QIODevice::WriteOnly | QIODevice::Text));
     statusFile.write(status.toLatin1() + "\n");
     statusFile.close();
+}
+
+void TestBatteryMonitor::createMockHealthSysfs(const QString &path, int capacity,
+    const QString &status, int chargeFullUah, int chargeFullDesignUah,
+    int voltageUv, int currentUa, int tempDeci, int cycles)
+{
+    createMockSysfs(path, capacity, status);
+
+    auto writeFile = [&](const char *name, int value) {
+        QFile f(path + "/" + name);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            f.write(QByteArray::number(value) + "\n");
+    };
+
+    writeFile("charge_full", chargeFullUah);
+    writeFile("charge_full_design", chargeFullDesignUah);
+    writeFile("voltage_now", voltageUv);
+    writeFile("current_now", currentUa);
+    writeFile("temp", tempDeci);
+    writeFile("cycle_count", cycles);
 }
 
 void TestBatteryMonitor::testInitialization()
@@ -552,6 +584,157 @@ void TestBatteryMonitor::testPredictionNoVectorCopy()
     
     double hoursRemaining = prediction["hours_remaining"].toDouble();
     QVERIFY(hoursRemaining > 4.0 && hoursRemaining < 6.0); // ~5 hours
+}
+
+void TestBatteryMonitor::testHealthReadFromSysfs()
+{
+    // Create mock sysfs with health data (415 mAh design, 361 mAh learned)
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    createMockHealthSysfs(mockBatteryPath, 73, "Discharging",
+                          361000, 415000,   // charge_full, charge_full_design (µAh)
+                          3850000, -120000, // voltage_now (µV), current_now (µA)
+                          285, 142);         // temp (0.1°C = 28.5°C), cycle_count
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+
+    monitor.readBatteryLevel();
+    monitor.readBatteryHealth();
+
+    QCOMPARE(monitor.level(), 73);
+    QCOMPARE(monitor.designCapacityMah(), 415);
+    QCOMPARE(monitor.learnedCapacityMah(), 361);
+    QCOMPARE(monitor.cycleCount(), 142);
+    QCOMPARE(monitor.voltageNowMv(), 3850);
+    QCOMPARE(monitor.currentNowMa(), -120);
+    QCOMPARE(monitor.temperatureDeci(), 285);
+
+    // Health percent should be ~87%
+    int health = monitor.healthPercent();
+    QVERIFY(health >= 86 && health <= 88);
+}
+
+void TestBatteryMonitor::testHealthUnavailableWithoutSysfs()
+{
+    BatteryMonitor monitor(m_configDir);
+    // No sysfs path set
+
+    QCOMPARE(monitor.healthPercent(), -1);
+    QCOMPARE(monitor.learnedCapacityMah(), -1);
+    QCOMPARE(monitor.designCapacityMah(), -1);
+    QCOMPARE(monitor.cycleCount(), 0);
+    QCOMPARE(monitor.healthConfidence(), QString("unavailable"));
+}
+
+void TestBatteryMonitor::testHealthEmaSmoothing()
+{
+    BatteryMonitor monitor(m_configDir);
+
+    // Simulate 10 charge_full readings with some noise
+    int baseCapacity = 360000; // 360 mAh in µAh
+    for (int i = 0; i < 10; ++i) {
+        int noise = (i % 2 == 0) ? 2000 : -2000; // ±2 mAh noise
+        monitor.m_designCapacityUah = 415000;
+        monitor.updateLearnedCapacity(baseCapacity + noise);
+    }
+
+    // EMA should have converged close to baseCapacity
+    int learned = monitor.learnedCapacityMah();
+    QVERIFY(learned >= 358 && learned <= 362);
+    QCOMPARE(monitor.m_emaSampleCount, 10);
+
+    // Confidence should be "medium" (5-19 samples)
+    QCOMPARE(monitor.healthConfidence(), QString("medium"));
+}
+
+void TestBatteryMonitor::testHealthPersistence()
+{
+    // Write health data
+    {
+        BatteryMonitor monitor(m_configDir);
+        monitor.m_designCapacityUah = 415000;
+        monitor.updateLearnedCapacity(361000);
+        monitor.updateLearnedCapacity(359000);
+        monitor.updateLearnedCapacity(362000);
+        monitor.saveHealthData();
+    }
+
+    // Read it back
+    {
+        BatteryMonitor monitor(m_configDir);
+        // loadHealthData is called in constructor
+
+        QCOMPARE(monitor.m_designCapacityUah, 415000);
+        QCOMPARE(monitor.m_emaSampleCount, 3);
+        QVERIFY(monitor.m_emaCapacityUah > 350000 && monitor.m_emaCapacityUah < 370000);
+        QCOMPARE(monitor.m_healthTimestamps.size(), 3);
+        QCOMPARE(monitor.m_healthSamples.size(), 3);
+
+        // Verify the persisted EMA produces valid health
+        int health = monitor.healthPercent();
+        QVERIFY(health >= 85 && health <= 89);
+    }
+}
+
+void TestBatteryMonitor::testHealthConfidenceLevels()
+{
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_designCapacityUah = 415000;
+
+    QCOMPARE(monitor.healthConfidence(), QString("unavailable"));
+
+    // 1 sample -> low
+    monitor.updateLearnedCapacity(360000);
+    QCOMPARE(monitor.healthConfidence(), QString("low"));
+
+    // 5 samples -> medium
+    for (int i = 0; i < 4; ++i)
+        monitor.updateLearnedCapacity(360000);
+    QCOMPARE(monitor.healthConfidence(), QString("medium"));
+
+    // 20 samples -> high
+    for (int i = 0; i < 15; ++i)
+        monitor.updateLearnedCapacity(360000);
+    QCOMPARE(monitor.healthConfidence(), QString("high"));
+}
+
+void TestBatteryMonitor::testHealthInfoJson()
+{
+    QString mockBatteryPath = m_mockSysfsDir + "/battery";
+    createMockHealthSysfs(mockBatteryPath, 50, "Discharging",
+                          350000, 400000, 3700000, -100000, 250, 100);
+
+    BatteryMonitor monitor(m_configDir);
+    monitor.m_powerSupplyPath = mockBatteryPath;
+    monitor.readBatteryLevel();
+    monitor.readBatteryHealth();
+
+    QJsonObject info = monitor.healthInfo();
+    QVERIFY(info.contains("health_percent"));
+    QVERIFY(info.contains("learned_capacity_mah"));
+    QVERIFY(info.contains("design_capacity_mah"));
+    QVERIFY(info.contains("cycle_count"));
+    QVERIFY(info.contains("voltage_mv"));
+    QVERIFY(info.contains("current_ma"));
+    QVERIFY(info.contains("temperature_deci"));
+    QVERIFY(info.contains("confidence"));
+    QVERIFY(info.contains("sample_count"));
+    QVERIFY(info.contains("history"));
+
+    QCOMPARE(info["design_capacity_mah"].toInt(), 400);
+    QCOMPARE(info["learned_capacity_mah"].toInt(), 350);
+    QCOMPARE(info["cycle_count"].toInt(), 100);
+    QCOMPARE(info["voltage_mv"].toInt(), 3700);
+    QCOMPARE(info["current_ma"].toInt(), -100);
+
+    // Health ~87.5%
+    int health = info["health_percent"].toInt();
+    QVERIFY(health >= 87 && health <= 88);
+
+    // History array should have 1 sample
+    QJsonArray hist = info["history"].toArray();
+    QCOMPARE(hist.size(), 1);
+    QCOMPARE(hist[0].toObject()["mah"].toInt(), 350);
 }
 
 QTEST_MAIN(TestBatteryMonitor)

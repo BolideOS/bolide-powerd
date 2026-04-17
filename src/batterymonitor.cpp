@@ -6,6 +6,9 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QDataStream>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QtEndian>
 #include <cmath>
 
@@ -19,6 +22,14 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
     , m_historyDays(DEFAULT_BATTERY_HISTORY_DAYS)
     , m_pollTimer(new QTimer(this))
     , m_heartbeatTimer(new QTimer(this))
+    , m_designCapacityUah(0)
+    , m_learnedCapacityUah(0)
+    , m_voltageNowUv(0)
+    , m_currentNowUa(0)
+    , m_temperatureDeci(0)
+    , m_cycleCount(0)
+    , m_emaCapacityUah(0.0)
+    , m_emaSampleCount(0)
 {
     m_powerSupplyPath = findPowerSupplyPath();
     
@@ -30,11 +41,13 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
     connect(m_heartbeatTimer, &QTimer::timeout, this, &BatteryMonitor::heartbeat);
 
     loadHistory();
+    loadHealthData();
 }
 
 void BatteryMonitor::start()
 {
     readBatteryLevel();
+    readBatteryHealth();
     m_lastRecordedLevel = m_level;
     recordEntry();
 
@@ -48,6 +61,7 @@ void BatteryMonitor::stop()
     m_pollTimer->stop();
     m_heartbeatTimer->stop();
     saveHistory();
+    saveHealthData();
 }
 
 int BatteryMonitor::level() const
@@ -58,6 +72,94 @@ int BatteryMonitor::level() const
 bool BatteryMonitor::charging() const
 {
     return m_charging;
+}
+
+int BatteryMonitor::healthPercent() const
+{
+    if (m_designCapacityUah <= 0)
+        return -1; // unavailable
+
+    int learned = m_emaSampleCount > 0
+        ? qRound(m_emaCapacityUah)
+        : m_learnedCapacityUah;
+
+    if (learned <= 0)
+        return -1;
+
+    int pct = qRound(learned * 100.0 / m_designCapacityUah);
+    return qBound(0, pct, 150); // cap at 150% to catch gauge calibration quirks
+}
+
+int BatteryMonitor::learnedCapacityMah() const
+{
+    int learned = m_emaSampleCount > 0
+        ? qRound(m_emaCapacityUah)
+        : m_learnedCapacityUah;
+
+    return learned > 0 ? qRound(learned / 1000.0) : -1;
+}
+
+int BatteryMonitor::designCapacityMah() const
+{
+    return m_designCapacityUah > 0 ? qRound(m_designCapacityUah / 1000.0) : -1;
+}
+
+int BatteryMonitor::cycleCount() const
+{
+    return m_cycleCount;
+}
+
+int BatteryMonitor::voltageNowMv() const
+{
+    return m_voltageNowUv > 0 ? qRound(m_voltageNowUv / 1000.0) : -1;
+}
+
+int BatteryMonitor::currentNowMa() const
+{
+    return m_currentNowUa != 0 ? qRound(m_currentNowUa / 1000.0) : 0;
+}
+
+int BatteryMonitor::temperatureDeci() const
+{
+    return m_temperatureDeci;
+}
+
+QString BatteryMonitor::healthConfidence() const
+{
+    if (m_emaSampleCount >= 20)
+        return QStringLiteral("high");
+    if (m_emaSampleCount >= 5)
+        return QStringLiteral("medium");
+    if (m_emaSampleCount >= 1 || m_learnedCapacityUah > 0)
+        return QStringLiteral("low");
+    return QStringLiteral("unavailable");
+}
+
+QJsonObject BatteryMonitor::healthInfo() const
+{
+    QJsonObject obj;
+    obj[QLatin1String("health_percent")] = healthPercent();
+    obj[QLatin1String("learned_capacity_mah")] = learnedCapacityMah();
+    obj[QLatin1String("design_capacity_mah")] = designCapacityMah();
+    obj[QLatin1String("cycle_count")] = m_cycleCount;
+    obj[QLatin1String("voltage_mv")] = voltageNowMv();
+    obj[QLatin1String("current_ma")] = currentNowMa();
+    obj[QLatin1String("temperature_deci")] = m_temperatureDeci;
+    obj[QLatin1String("confidence")] = healthConfidence();
+    obj[QLatin1String("sample_count")] = m_emaSampleCount;
+
+    // Include raw history for trend analysis on the UI side
+    QJsonArray samplesArr;
+    int count = qMin(m_healthTimestamps.size(), m_healthSamples.size());
+    for (int i = 0; i < count; ++i) {
+        QJsonObject s;
+        s[QLatin1String("t")] = m_healthTimestamps[i];
+        s[QLatin1String("mah")] = qRound(m_healthSamples[i] / 1000.0);
+        samplesArr.append(s);
+    }
+    obj[QLatin1String("history")] = samplesArr;
+
+    return obj;
 }
 
 QVector<BatteryMonitor::BatteryEntry> BatteryMonitor::history(int hours) const
@@ -224,9 +326,11 @@ void BatteryMonitor::pollBattery()
 
 void BatteryMonitor::heartbeat()
 {
+    readBatteryHealth();
     recordEntry();
     m_lastRecordedLevel = m_level;
     saveHistory();
+    saveHealthData();
 }
 
 void BatteryMonitor::readBatteryLevel()
@@ -255,6 +359,149 @@ void BatteryMonitor::readBatteryLevel()
                       status.compare(QLatin1String("Full"), Qt::CaseInsensitive) == 0);
         statusFile.close();
     }
+}
+
+int BatteryMonitor::readSysfsInt(const QString &filename) const
+{
+    if (m_powerSupplyPath.isEmpty())
+        return 0;
+
+    QFile file(m_powerSupplyPath + "/" + filename);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QString content = QString::fromLatin1(file.readAll().trimmed());
+        file.close();
+        bool ok = false;
+        int val = content.toInt(&ok);
+        return ok ? val : 0;
+    }
+    return 0;
+}
+
+void BatteryMonitor::readBatteryHealth()
+{
+    if (m_powerSupplyPath.isEmpty())
+        return;
+
+    int prevHealth = healthPercent();
+
+    // Read design capacity (µAh) — typically constant
+    int designUah = readSysfsInt("charge_full_design");
+    if (designUah > 0)
+        m_designCapacityUah = designUah;
+
+    // Read current learned capacity (µAh) — updated by fuel gauge
+    int chargeFullUah = readSysfsInt("charge_full");
+    if (chargeFullUah > 0) {
+        m_learnedCapacityUah = chargeFullUah;
+        updateLearnedCapacity(chargeFullUah);
+    }
+
+    // Instantaneous readings
+    m_voltageNowUv = readSysfsInt("voltage_now");
+    m_currentNowUa = readSysfsInt("current_now");
+    m_temperatureDeci = readSysfsInt("temp");
+    m_cycleCount = readSysfsInt("cycle_count");
+
+    if (healthPercent() != prevHealth)
+        emit healthChanged();
+}
+
+void BatteryMonitor::updateLearnedCapacity(int chargeFullUah)
+{
+    if (chargeFullUah <= 0)
+        return;
+
+    // EMA smoothing: alpha starts high (quick initial convergence) and
+    // decreases as we accumulate samples, down to a floor of 0.05
+    double alpha;
+    if (m_emaSampleCount == 0) {
+        m_emaCapacityUah = chargeFullUah;
+        alpha = 1.0;
+    } else {
+        alpha = qMax(0.05, 2.0 / (m_emaSampleCount + 1));
+        m_emaCapacityUah = alpha * chargeFullUah + (1.0 - alpha) * m_emaCapacityUah;
+    }
+    m_emaSampleCount++;
+
+    // Record timestamped sample for trend analysis
+    qint64 now = QDateTime::currentSecsSinceEpoch();
+    m_healthTimestamps.append(now);
+    m_healthSamples.append(chargeFullUah);
+
+    // Trim oldest if exceeding cap
+    while (m_healthTimestamps.size() > MAX_HEALTH_SAMPLES) {
+        m_healthTimestamps.remove(0);
+        m_healthSamples.remove(0);
+    }
+}
+
+void BatteryMonitor::loadHealthData()
+{
+    QString path = m_configDir + "/" + QString::fromLatin1(POWERD_HEALTH_FILE);
+    QFile file(path);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly))
+        return;
+
+    QJsonParseError parseError;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseError);
+    file.close();
+
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+        return;
+
+    QJsonObject obj = doc.object();
+    m_designCapacityUah = obj.value(QLatin1String("design_uah")).toInt(0);
+    m_emaCapacityUah = obj.value(QLatin1String("ema_uah")).toDouble(0.0);
+    m_emaSampleCount = obj.value(QLatin1String("ema_count")).toInt(0);
+
+    QJsonArray samples = obj.value(QLatin1String("samples")).toArray();
+    m_healthTimestamps.clear();
+    m_healthSamples.clear();
+    m_healthTimestamps.reserve(samples.size());
+    m_healthSamples.reserve(samples.size());
+
+    for (int i = 0; i < samples.size(); ++i) {
+        QJsonObject s = samples[i].toObject();
+        m_healthTimestamps.append(static_cast<qint64>(s.value(QLatin1String("t")).toDouble()));
+        m_healthSamples.append(s.value(QLatin1String("uah")).toInt());
+    }
+
+    if (m_emaCapacityUah > 0 && m_emaSampleCount > 0)
+        m_learnedCapacityUah = qRound(m_emaCapacityUah);
+}
+
+void BatteryMonitor::saveHealthData()
+{
+    // Only save if we have actual data
+    if (m_emaSampleCount == 0 && m_designCapacityUah == 0)
+        return;
+
+    QJsonObject obj;
+    obj[QLatin1String("design_uah")] = m_designCapacityUah;
+    obj[QLatin1String("ema_uah")] = m_emaCapacityUah;
+    obj[QLatin1String("ema_count")] = m_emaSampleCount;
+
+    QJsonArray samples;
+    int count = qMin(m_healthTimestamps.size(), m_healthSamples.size());
+    for (int i = 0; i < count; ++i) {
+        QJsonObject s;
+        s[QLatin1String("t")] = m_healthTimestamps[i];
+        s[QLatin1String("uah")] = m_healthSamples[i];
+        samples.append(s);
+    }
+    obj[QLatin1String("samples")] = samples;
+
+    QString path = m_configDir + "/" + QString::fromLatin1(POWERD_HEALTH_FILE);
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "Failed to save battery health data to:" << path;
+        return;
+    }
+
+    QJsonDocument doc(obj);
+    file.write(doc.toJson(QJsonDocument::Compact));
+    if (!file.commit())
+        qWarning() << "Failed to commit battery health file";
 }
 
 void BatteryMonitor::recordEntry()
