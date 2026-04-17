@@ -149,6 +149,10 @@ int main(int argc, char *argv[])
             qInfo() << "Applied system config for profile" << name;
         }
 
+        // Notify SystemController of radio state so WhenRadiosOn btsyncd mode works
+        bool radiosEnabled = (profile.radios.ble.state == RadioState::On);
+        systemController.updateBackgroundSyncServices(profile.system.background_sync, radiosEnabled);
+
         // Update battery monitor with active profile
         batteryMonitor.setActiveProfile(id);
     });
@@ -177,6 +181,11 @@ int main(int argc, char *argv[])
         sensorController->applyConfig(activeProfile.sensors);
         radioController.applyConfig(activeProfile.radios);
         systemController.applyConfig(activeProfile.system);
+
+        // Sync radio state to SystemController for WhenRadiosOn btsyncd mode
+        bool radiosOn = (activeProfile.radios.ble.state == RadioState::On);
+        systemController.updateBackgroundSyncServices(activeProfile.system.background_sync, radiosOn);
+
         batteryMonitor.setActiveProfile(activeProfileId);
     }
 
