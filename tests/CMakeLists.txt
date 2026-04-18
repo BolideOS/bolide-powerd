@@ -1,5 +1,3 @@
-find_package(Qt5 COMPONENTS Test REQUIRED)
-
 # Pass source dir to tests so they can find data files
 add_definitions(-DCMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 

@@ -18,3 +18,4 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 *.autogen/
+build-test/
