@@ -66,7 +66,7 @@ private:
 
 void TestAutomationEngine::initTestCase()
 {
-    m_tempDir = QStringLiteral("/tmp/asteroid-powerd-test-automation-XXXXXX");
+    m_tempDir = QStringLiteral("/tmp/bolide-powerd-test-automation-XXXXXX");
     QDir().mkpath(m_tempDir);
     // Point to the source-tree default profiles for testing
     qputenv("POWERD_DEFAULT_PROFILES",

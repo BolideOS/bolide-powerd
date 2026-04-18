@@ -1,4 +1,4 @@
-# asteroid-powerd
+# bolide-powerd
 
 Power management daemon for [AsteroidOS](https://asteroidos.org/). Gives you profile-based control over sensors, radios, and system settings on your watch.
 
@@ -11,9 +11,9 @@ Power management daemon for [AsteroidOS](https://asteroidos.org/). Gives you pro
 
 ## What is this?
 
-`asteroid-powerd` is a system daemon that manages power on AsteroidOS watches. Instead of just having one "battery saver" toggle, you get multiple profiles that are each tuned for a specific situation (indoor, outdoor, health tracking, workouts, etc). Each profile has its own config for every sensor, radio, and system setting on the watch. The daemon can also switch profiles automatically based on battery level or time of day.
+`bolide-powerd` is a system daemon that manages power on AsteroidOS watches. Instead of just having one "battery saver" toggle, you get multiple profiles that are each tuned for a specific situation (indoor, outdoor, health tracking, workouts, etc). Each profile has its own config for every sensor, radio, and system setting on the watch. The daemon can also switch profiles automatically based on battery level or time of day.
 
-Everything is exposed over D-Bus (`org.asteroidos.powerd`) so any UI can talk to it. The settings UI lives in [asteroid-settings](https://github.com/AsteroidOS/asteroid-settings).
+Everything is exposed over D-Bus (`org.bolideos.powerd`) so any UI can talk to it. The settings UI lives in [asteroid-settings](https://github.com/AsteroidOS/asteroid-settings).
 
 ## Features
 
@@ -218,9 +218,9 @@ Map workout types to profiles so you can switch with one tap:
 
 ## D-Bus Interface
 
-Service: `org.asteroidos.powerd`
-Object: `/org/asteroidos/powerd`
-Interface: `org.asteroidos.powerd.ProfileManager`
+Service: `org.bolideos.powerd`
+Object: `/org/bolideos/powerd`
+Interface: `org.bolideos.powerd.ProfileManager`
 
 ### Methods
 
@@ -278,15 +278,15 @@ ctest --output-on-failure
 
 ```bash
 make install
-systemctl enable asteroid-powerd
-systemctl start asteroid-powerd
+systemctl enable bolide-powerd
+systemctl start bolide-powerd
 ```
 
 Or through the AsteroidOS Yocto build system:
 
 ```bash
 source oe-core/oe-init-build-env build
-bitbake asteroid-powerd
+bitbake bolide-powerd
 ```
 
 ## Architecture
@@ -294,7 +294,7 @@ bitbake asteroid-powerd
 ```
 ┌──────────────────────────────────────────────┐
 │              D-Bus Interface                 │
-│    org.asteroidos.powerd.ProfileManager      │
+│    org.bolideos.powerd.ProfileManager      │
 └────────────────────┬─────────────────────────┘
                      │
          ┌───────────┴───────────┐

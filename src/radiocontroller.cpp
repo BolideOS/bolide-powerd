@@ -219,8 +219,8 @@ void RadioController::triggerSync()
     
     // Also send D-Bus signal that companion apps can listen to
     QDBusMessage signal = QDBusMessage::createSignal(
-        "/org/asteroidos/powerd",
-        "org.asteroidos.powerd.ProfileManager",
+        "/org/bolideos/powerd",
+        "org.bolideos.powerd.ProfileManager",
         "SyncTriggered"
     );
     QDBusConnection::systemBus().send(signal);

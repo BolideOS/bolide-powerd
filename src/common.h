@@ -2,17 +2,17 @@
 #define COMMON_H
 
 // D-Bus constants
-#define POWERD_SERVICE      "org.asteroidos.powerd"
-#define POWERD_PATH         "/org/asteroidos/powerd"
-#define POWERD_INTERFACE    "org.asteroidos.powerd.ProfileManager"
+#define POWERD_SERVICE      "org.bolideos.powerd"
+#define POWERD_PATH         "/org/bolideos/powerd"
+#define POWERD_INTERFACE    "org.bolideos.powerd.ProfileManager"
 
 // Config paths
-#define POWERD_CONFIG_DIR   ".config/asteroid-powerd"
+#define POWERD_CONFIG_DIR   ".config/bolide-powerd"
 #define POWERD_PROFILES_FILE "profiles.json"
 #define POWERD_SETTINGS_FILE "settings.json"
 #define POWERD_BATTERY_FILE  "battery_history.bin"
 #define POWERD_HEALTH_FILE   "battery_health.json"
-#define POWERD_DEFAULT_PROFILES_PATH "/usr/share/asteroid-powerd/default-profiles.json"
+#define POWERD_DEFAULT_PROFILES_PATH "/usr/share/bolide-powerd/default-profiles.json"
 
 // Defaults
 #define DEFAULT_BATTERY_HISTORY_DAYS 14

@@ -47,13 +47,13 @@ void setupUnixSignalHandlers()
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("asteroid-powerd"));
+    app.setApplicationName(QStringLiteral("bolide-powerd"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     
     g_app = &app;
     setupUnixSignalHandlers();
 
-    // Config directory: /home/ceres/.config/asteroid-powerd/
+    // Config directory: /home/ceres/.config/bolide-powerd/
     // Use HOME env, fallback to /home/ceres
     QString home = qEnvironmentVariable("HOME");
     if (home.isEmpty()) {
@@ -217,7 +217,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    qInfo() << "asteroid-powerd started";
+    qInfo() << "bolide-powerd started";
     qInfo() << "Active profile:" << profileManager.activeProfileId();
     qInfo() << "Total profiles:" << profileManager.profiles().size();
     qInfo() << "Battery level:" << batteryMonitor.level() << "%";
@@ -242,6 +242,6 @@ int main(int argc, char *argv[])
     delete sensorController;
     sensorController = nullptr;
 
-    qInfo() << "asteroid-powerd stopped";
+    qInfo() << "bolide-powerd stopped";
     return ret;
 }
