@@ -3,6 +3,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QMap>
+#include <QVector>
 #include <QDBusAbstractAdaptor>
 #include "profilemanager.h"
 #include "batterymonitor.h"
@@ -38,6 +40,15 @@ public Q_SLOTS:
     QString GetBatteryHealth();
     QString GetCurrentState();
 
+    // ── Sensor access coordination ─────────────────────────────────────
+    // Called by fitness/health apps to ensure a sensor stays active at the
+    // requested minimum sampling interval.  Powerd will not down-clock
+    // or disable the sensor while at least one access grant is active.
+    bool RequestSensorAccess(const QString &sensorName, int minIntervalMs);
+    bool ReleaseSensorAccess(const QString &sensorName);
+    QString GetAvailableSensors();
+    QString GetActiveSensorGrants();
+
 Q_SIGNALS:
     void ActiveProfileChanged(const QString &id, const QString &name);
     void ProfilesChanged();
@@ -45,6 +56,8 @@ Q_SIGNALS:
     void WorkoutStopped();
     void BatteryLevelChanged(int level, bool charging);
     void BatteryHealthChanged(int healthPercent, int learnedMah, int designMah);
+    void SensorAccessGranted(const QString &sensorName, int effectiveIntervalMs);
+    void SensorAccessReleased(const QString &sensorName);
 
 private Q_SLOTS:
     void onProfileManagerActiveProfileChanged(const QString &id, const QString &name);
@@ -57,6 +70,15 @@ private:
     QString m_activeWorkoutType;
     bool m_workoutActive;
     QString m_cachedProfilesJson;  // Invalidated on ProfilesChanged
+
+    // ── Sensor access tracking ─────────────────────────────────────────
+    struct SensorGrant {
+        int minIntervalMs;
+    };
+    // sensor name → list of grants (one per RequestSensorAccess call)
+    QMap<QString, QVector<SensorGrant>> m_sensorGrants;
+    int effectiveInterval(const QString &sensorName) const;
+    void applySensorMode(const QString &sensorName);
 };
 
 #endif // DBUSINTERFACE_H

@@ -344,3 +344,137 @@ void DBusInterface::onProfileManagerProfilesChanged()
     m_cachedProfilesJson.clear();  // Invalidate cache
     emit ProfilesChanged();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sensor access coordination
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool DBusInterface::RequestSensorAccess(const QString &sensorName, int minIntervalMs)
+{
+    if (sensorName.isEmpty() || minIntervalMs <= 0) {
+        qWarning() << "RequestSensorAccess: invalid parameters:" << sensorName << minIntervalMs;
+        return false;
+    }
+
+    SensorGrant grant;
+    grant.minIntervalMs = minIntervalMs;
+    m_sensorGrants[sensorName].append(grant);
+
+    int eff = effectiveInterval(sensorName);
+    applySensorMode(sensorName);
+
+    qInfo() << "Sensor access granted:" << sensorName
+            << "interval:" << minIntervalMs << "ms"
+            << "effective:" << eff << "ms"
+            << "grants:" << m_sensorGrants[sensorName].size();
+
+    emit SensorAccessGranted(sensorName, eff);
+    return true;
+}
+
+bool DBusInterface::ReleaseSensorAccess(const QString &sensorName)
+{
+    if (sensorName.isEmpty()) {
+        qWarning() << "ReleaseSensorAccess: empty sensor name";
+        return false;
+    }
+
+    auto it = m_sensorGrants.find(sensorName);
+    if (it == m_sensorGrants.end() || it->isEmpty()) {
+        qWarning() << "ReleaseSensorAccess: no active grants for:" << sensorName;
+        return false;
+    }
+
+    // Remove one grant (LIFO – last request released first)
+    it->removeLast();
+
+    if (it->isEmpty()) {
+        m_sensorGrants.erase(it);
+        qInfo() << "Sensor fully released:" << sensorName;
+    } else {
+        int eff = effectiveInterval(sensorName);
+        qInfo() << "Sensor grant released:" << sensorName
+                << "remaining:" << it->size()
+                << "effective:" << eff << "ms";
+    }
+
+    applySensorMode(sensorName);
+    emit SensorAccessReleased(sensorName);
+    return true;
+}
+
+QString DBusInterface::GetAvailableSensors()
+{
+    // Report sensors known to the platform.
+    // In Phase 2 this will auto-discover from SensorFW and IIO.
+    QJsonArray arr;
+    static const QStringList knownSensors = {
+        QStringLiteral("heart_rate"),
+        QStringLiteral("accelerometer"),
+        QStringLiteral("gyroscope"),
+        QStringLiteral("barometer"),
+        QStringLiteral("gps"),
+        QStringLiteral("step_count"),
+        QStringLiteral("ppg_raw"),
+        QStringLiteral("spo2"),
+        QStringLiteral("temperature"),
+        QStringLiteral("compass"),
+        QStringLiteral("ambient_light")
+    };
+    for (const QString &s : knownSensors) {
+        QJsonObject obj;
+        obj[QLatin1String("name")] = s;
+        obj[QLatin1String("active_grants")] = m_sensorGrants.value(s).size();
+        obj[QLatin1String("effective_interval_ms")] = effectiveInterval(s);
+        arr.append(obj);
+    }
+    QJsonDocument doc(arr);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
+QString DBusInterface::GetActiveSensorGrants()
+{
+    QJsonObject obj;
+    for (auto it = m_sensorGrants.constBegin(); it != m_sensorGrants.constEnd(); ++it) {
+        QJsonObject sensorObj;
+        sensorObj[QLatin1String("grant_count")] = it->size();
+        sensorObj[QLatin1String("effective_interval_ms")] = effectiveInterval(it.key());
+        QJsonArray intervals;
+        for (const SensorGrant &g : *it)
+            intervals.append(g.minIntervalMs);
+        sensorObj[QLatin1String("intervals")] = intervals;
+        obj[it.key()] = sensorObj;
+    }
+    QJsonDocument doc(obj);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
+int DBusInterface::effectiveInterval(const QString &sensorName) const
+{
+    const auto grants = m_sensorGrants.value(sensorName);
+    if (grants.isEmpty())
+        return 0;
+
+    // Effective interval = minimum of all requested intervals
+    int minMs = grants.first().minIntervalMs;
+    for (int i = 1; i < grants.size(); ++i) {
+        if (grants[i].minIntervalMs < minMs)
+            minMs = grants[i].minIntervalMs;
+    }
+    return minMs;
+}
+
+void DBusInterface::applySensorMode(const QString &sensorName)
+{
+    // TODO: Phase 2 – actually communicate with SensorFW / IIO to
+    // set the sensor sampling rate or enable/disable it.
+    // For now, we just track the grants and log the effective rate.
+    int eff = effectiveInterval(sensorName);
+    if (eff > 0) {
+        qDebug() << "applySensorMode:" << sensorName
+                 << "→ active at" << eff << "ms";
+    } else {
+        qDebug() << "applySensorMode:" << sensorName
+                 << "→ no grants, profile-based mode";
+    }
+}

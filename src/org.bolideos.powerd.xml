@@ -73,8 +73,35 @@
       <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QString"/>
     </method>
 
+    <method name="GetBatteryHealth">
+      <arg name="healthInfo" type="s" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QString"/>
+    </method>
+
     <method name="GetCurrentState">
       <arg name="state" type="s" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QString"/>
+    </method>
+
+    <!-- Sensor access coordination methods -->
+    <method name="RequestSensorAccess">
+      <arg name="sensorName" type="s" direction="in"/>
+      <arg name="minIntervalMs" type="i" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+
+    <method name="ReleaseSensorAccess">
+      <arg name="sensorName" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+
+    <method name="GetAvailableSensors">
+      <arg name="sensors" type="s" direction="out"/>
+      <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QString"/>
+    </method>
+
+    <method name="GetActiveSensorGrants">
+      <arg name="grants" type="s" direction="out"/>
       <annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QString"/>
     </method>
 
@@ -96,6 +123,21 @@
     <signal name="BatteryLevelChanged">
       <arg name="level" type="i"/>
       <arg name="charging" type="b"/>
+    </signal>
+
+    <signal name="BatteryHealthChanged">
+      <arg name="healthPercent" type="i"/>
+      <arg name="learnedMah" type="i"/>
+      <arg name="designMah" type="i"/>
+    </signal>
+
+    <signal name="SensorAccessGranted">
+      <arg name="sensorName" type="s"/>
+      <arg name="effectiveIntervalMs" type="i"/>
+    </signal>
+
+    <signal name="SensorAccessReleased">
+      <arg name="sensorName" type="s"/>
     </signal>
   </interface>
 </node>
