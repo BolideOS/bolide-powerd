@@ -87,7 +87,10 @@ private:
     void updateLearnedCapacity(int chargeFullUah);
     void trimHistory();
     int readSysfsInt(const QString &filename) const;
-    QString findPowerSupplyPath() const;
+    int readSysfsIntFrom(const QString &basePath, const QString &filename) const;
+    void discoverPowerSupplySources();
+    int readBestSource(const QString &filename, bool allowNegative = false) const;
+    int knownDesignCapacityUah() const;
 
     // Software coulomb counting fallback
     void coulombAccumulate();
@@ -96,7 +99,9 @@ private:
     bool m_chargeFullAvailable;
 
     QString m_configDir;
-    QString m_powerSupplyPath;
+    QString m_powerSupplyPath;          // Primary node for level/status (type=Battery)
+    QStringList m_healthSourcePaths;    // Ranked list of nodes to try for health data
+    QString m_hostname;                 // Device codename for known-capacity fallback
     int m_level;
     bool m_charging;
     int m_lastRecordedLevel;

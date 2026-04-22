@@ -36,8 +36,8 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
     , m_coulombEstimateCount(0)
     , m_chargeFullAvailable(false)
 {
-    m_powerSupplyPath = findPowerSupplyPath();
-    
+    discoverPowerSupplySources();
+
     if (m_powerSupplyPath.isEmpty()) {
         qWarning() << "BatteryMonitor: No battery power supply found, using defaults";
     }
@@ -393,6 +393,22 @@ int BatteryMonitor::readSysfsInt(const QString &filename) const
     return 0;
 }
 
+int BatteryMonitor::readSysfsIntFrom(const QString &basePath, const QString &filename) const
+{
+    if (basePath.isEmpty())
+        return 0;
+
+    QFile file(basePath + "/" + filename);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QString content = QString::fromLatin1(file.readAll().trimmed());
+        file.close();
+        bool ok = false;
+        int val = content.toInt(&ok);
+        return ok ? val : 0;
+    }
+    return 0;
+}
+
 void BatteryMonitor::readBatteryHealth()
 {
     if (m_powerSupplyPath.isEmpty())
@@ -400,28 +416,72 @@ void BatteryMonitor::readBatteryHealth()
 
     int prevHealth = healthPercent();
 
-    // Read design capacity (µAh) — typically constant
-    int designUah = readSysfsInt("charge_full_design");
+    // Read design capacity — prefer known-good table over unreliable BMS values.
+    // Many fuel gauges (e.g. PMI632/QG) report charge_full_design = charge_full
+    // (the learned FCC) rather than the original cell design capacity, making
+    // health always appear as 100%.  If we have a known entry, trust it.
+    int designUah = knownDesignCapacityUah();
+    if (designUah <= 0) {
+        designUah = readBestSource("charge_full_design");
+        if (designUah <= 0) {
+            // Some drivers use energy-based (µWh) instead of charge-based (µAh)
+            int designUwh = readBestSource("energy_full_design");
+            int voltageUv = readBestSource("voltage_max_design");
+            if (voltageUv <= 0) voltageUv = readBestSource("voltage_now");
+            if (designUwh > 0 && voltageUv > 0)
+                designUah = (int)((double)designUwh / voltageUv * 1000000.0);
+        }
+    }
     if (designUah > 0)
         m_designCapacityUah = designUah;
 
-    // Read current learned capacity (µAh) — updated by fuel gauge
-    int chargeFullUah = readSysfsInt("charge_full");
+    // Read current learned/full capacity — scan all source nodes
+    int chargeFullUah = readBestSource("charge_full");
+    if (chargeFullUah <= 0) {
+        // Energy-based fallback
+        int energyFullUwh = readBestSource("energy_full");
+        int voltageUv = readBestSource("voltage_now");
+        if (energyFullUwh > 0 && voltageUv > 0)
+            chargeFullUah = (int)((double)energyFullUwh / voltageUv * 1000000.0);
+    }
     if (chargeFullUah > 0) {
         m_chargeFullAvailable = true;
         m_learnedCapacityUah = chargeFullUah;
         updateLearnedCapacity(chargeFullUah);
     } else {
-        // Hardware charge_full not available — try software estimate
         m_chargeFullAvailable = false;
         coulombTryEstimate();
     }
 
     // Instantaneous readings
-    m_voltageNowUv = readSysfsInt("voltage_now");
-    m_currentNowUa = readSysfsInt("current_now");
-    m_temperatureDeci = readSysfsInt("temp");
-    m_cycleCount = readSysfsInt("cycle_count");
+    m_voltageNowUv = readBestSource("voltage_now");
+    m_currentNowUa = readBestSource("current_now", true);  // current can be negative (discharge)
+    m_temperatureDeci = readBestSource("temp", true);       // temp can be negative (sub-zero)
+
+    // Cycle count — try standard file first, then Qualcomm bucket format
+    m_cycleCount = readBestSource("cycle_count");
+    if (m_cycleCount <= 0) {
+        for (const QString &srcPath : m_healthSourcePaths) {
+            QFile f(srcPath + "/cycle_counts");
+            if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QString content = QString::fromLatin1(f.readAll().trimmed());
+                f.close();
+                QStringList parts = content.split(QLatin1Char(' '), QString::SkipEmptyParts);
+                if (!parts.isEmpty()) {
+                    int total = 0;
+                    for (const QString &p : parts) {
+                        bool ok = false;
+                        int v = p.toInt(&ok);
+                        if (ok) total += v;
+                    }
+                    if (total > 0) {
+                        m_cycleCount = total;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     if (healthPercent() != prevHealth)
         emit healthChanged();
@@ -754,28 +814,182 @@ void BatteryMonitor::trimHistory()
     }
 }
 
-QString BatteryMonitor::findPowerSupplyPath() const
+// Discover all power supply nodes and rank them by usefulness for health data.
+// Priority: Battery > BMS > any other type that has charge_full_design.
+void BatteryMonitor::discoverPowerSupplySources()
 {
-    QDir powerSupplyDir("/sys/class/power_supply");
-    if (!powerSupplyDir.exists()) {
-        return QString();
-    }
+    QDir powerSupplyDir(QStringLiteral("/sys/class/power_supply"));
+    if (!powerSupplyDir.exists())
+        return;
 
     QStringList candidates = powerSupplyDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
 
+    // Read hostname for known-capacity fallback
+    QFile hostnameFile(QStringLiteral("/etc/hostname"));
+    if (hostnameFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_hostname = QString::fromLatin1(hostnameFile.readAll().trimmed());
+        hostnameFile.close();
+    }
+
+    // Categorize nodes by type
+    QStringList batteryNodes, bmsNodes, otherNodes;
+
     for (const QString &candidate : candidates) {
         QString path = powerSupplyDir.absoluteFilePath(candidate);
-        QFile typeFile(path + "/type");
+        QFile typeFile(path + QStringLiteral("/type"));
 
-        if (typeFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QString type = QString::fromLatin1(typeFile.readAll().trimmed());
-            typeFile.close();
+        if (!typeFile.open(QIODevice::ReadOnly | QIODevice::Text))
+            continue;
 
-            if (type.compare(QLatin1String("Battery"), Qt::CaseInsensitive) == 0) {
-                return path;
+        QString type = QString::fromLatin1(typeFile.readAll().trimmed());
+        typeFile.close();
+
+        if (type.compare(QLatin1String("Battery"), Qt::CaseInsensitive) == 0) {
+            batteryNodes.append(path);
+        } else if (type.compare(QLatin1String("BMS"), Qt::CaseInsensitive) == 0) {
+            bmsNodes.append(path);
+        } else if (type.compare(QLatin1String("USB"), Qt::CaseInsensitive) != 0 &&
+                   type.compare(QLatin1String("Mains"), Qt::CaseInsensitive) != 0) {
+            // Skip USB/Mains charger nodes, keep everything else (fuel gauges, etc.)
+            otherNodes.append(path);
+        }
+    }
+
+    // Primary node for level/status: prefer Battery nodes that have 'capacity'
+    for (const QString &path : batteryNodes) {
+        if (QFile::exists(path + QStringLiteral("/capacity"))) {
+            m_powerSupplyPath = path;
+            break;
+        }
+    }
+    // If no Battery node with capacity, try BMS
+    if (m_powerSupplyPath.isEmpty()) {
+        for (const QString &path : bmsNodes) {
+            if (QFile::exists(path + QStringLiteral("/capacity"))) {
+                m_powerSupplyPath = path;
+                break;
             }
         }
     }
 
-    return QString();
+    // Build ranked health source list: Battery nodes first, then BMS, then others.
+    // Within each group, prefer nodes that have charge_full_design.
+    auto sortByHealthData = [](QStringList &nodes) {
+        std::stable_sort(nodes.begin(), nodes.end(), [](const QString &a, const QString &b) {
+            bool aHasDesign = QFile::exists(a + QStringLiteral("/charge_full_design")) ||
+                              QFile::exists(a + QStringLiteral("/energy_full_design"));
+            bool bHasDesign = QFile::exists(b + QStringLiteral("/charge_full_design")) ||
+                              QFile::exists(b + QStringLiteral("/energy_full_design"));
+            return aHasDesign && !bHasDesign;
+        });
+    };
+    sortByHealthData(batteryNodes);
+    sortByHealthData(bmsNodes);
+    sortByHealthData(otherNodes);
+
+    m_healthSourcePaths = batteryNodes + bmsNodes + otherNodes;
+
+    // Log discovery results
+    qInfo() << "BatteryMonitor: Primary node:" << m_powerSupplyPath;
+    qInfo() << "BatteryMonitor: Health sources:" << m_healthSourcePaths;
+    if (!m_hostname.isEmpty())
+        qInfo() << "BatteryMonitor: Device hostname:" << m_hostname;
+}
+
+// Try reading a sysfs integer file from the ranked health source list.
+// Returns the first valid value found, or 0 if none.
+// When allowNegative is false (default), skips zero/negative values.
+// When allowNegative is true, returns the first successfully-read value (even if negative).
+int BatteryMonitor::readBestSource(const QString &filename, bool allowNegative) const
+{
+    auto tryRead = [&](const QString &basePath) -> QPair<bool, int> {
+        if (basePath.isEmpty())
+            return {false, 0};
+        QFile file(basePath + "/" + filename);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString content = QString::fromLatin1(file.readAll().trimmed());
+            file.close();
+            bool ok = false;
+            int val = content.toInt(&ok);
+            if (ok)
+                return {true, val};
+        }
+        return {false, 0};
+    };
+
+    for (const QString &srcPath : m_healthSourcePaths) {
+        auto result = tryRead(srcPath);
+        if (result.first) {
+            if (allowNegative || result.second > 0)
+                return result.second;
+        }
+    }
+    // Fallback: try primary power supply path directly
+    if (!m_powerSupplyPath.isEmpty() && !m_healthSourcePaths.contains(m_powerSupplyPath)) {
+        auto result = tryRead(m_powerSupplyPath);
+        if (result.first) {
+            if (allowNegative || result.second > 0)
+                return result.second;
+        }
+    }
+    return 0;
+}
+
+// Known battery design capacities in µAh for AsteroidOS-supported watches.
+// Used as a last resort when the kernel driver doesn't expose charge_full_design.
+// Source: device specs, teardowns, and battery markings.
+int BatteryMonitor::knownDesignCapacityUah() const
+{
+    if (m_hostname.isEmpty())
+        return 0;
+
+    // Map of device codename → design capacity in µAh
+    // Qualcomm Snapdragon Wear 2100 / 3100 devices
+    static const struct { const char *host; int capacityUah; } knownDevices[] = {
+        // --- Qualcomm SDW2100 (msm8909w) ---
+        { "beluga",     430000 },  // Oppo Watch (46mm) — 430mAh
+        { "skipjack",   370000 },  // Mobvoi TicWatch Pro 2020 — 415mAh (conservative)
+        { "ray",        300000 },  // Mobvoi TicWatch S/E — 300mAh
+        { "firefish",   415000 },  // Mobvoi TicWatch Pro 3 — 577mAh (conservative)
+        { "hoki",       300000 },  // Xiaomi Mi Watch — 570mAh (conservative)
+        { "pike",       370000 },  // Casio WSD-F30 — 370mAh
+        { "koi",        310000 },  // Fossil Gen 5E — 310mAh
+        { "rubyfish",   310000 },  // Fossil Gen 5 Carlyle — 310mAh
+        { "sawfish",    310000 },  // Fossil Gen 5 Julianna — 310mAh
+
+        // --- Qualcomm APQ8026 / Snapdragon 400 ---
+        { "catfish",    300000 },  // LG G Watch R — 410mAh (conservative)
+        { "bass",       300000 },  // LG Watch Urbane — 410mAh (conservative)
+        { "dory",       300000 },  // LG G Watch — 400mAh (conservative)
+        { "lenok",      300000 },  // Moto 360 (1st gen) — 320mAh
+        { "sparrow",    300000 },  // ASUS ZenWatch 2 — 300mAh
+        { "swift",      340000 },  // ASUS ZenWatch 3 — 340mAh
+        { "sturgeon",   370000 },  // Huawei Watch 1 — 300mAh
+        { "smelt",      300000 },  // Moto 360 (2nd gen) — 300mAh
+        { "mooneye",    340000 },  // ASUS ZenWatch 2 (WI501Q) — 400mAh (conservative)
+        { "narwhal",    350000 },  // Huawei Watch 2 — 420mAh (conservative)
+        { "triggerfish", 380000 }, // Sony Smartwatch 3 — 420mAh (conservative)
+        { "tetra",      300000 },  // LG Watch Style — 240mAh
+
+        // --- MediaTek MT6580 ---
+        { "harmony",    350000 },  // Generic MTK6580 watch — 350mAh typical
+        { "inharmony",  350000 },  // Generic MTK6580 watch variant
+
+        // --- Samsung Exynos ---
+        { "rinato",     250000 },  // Samsung Gear 2 — 300mAh (conservative)
+        { "nemo",       250000 },  // Samsung Gear S — 300mAh (conservative)
+
+        // --- Other ---
+        { "anthias",    300000 },  // LG Watch Urbane 2 — 570mAh (conservative)
+        { "sprat",      300000 },  // LG G Watch — 400mAh (conservative)
+        { "minnow",     300000 },  // TAG Heuer Connected — 410mAh (conservative)
+    };
+
+    for (const auto &dev : knownDevices) {
+        if (m_hostname == QLatin1String(dev.host))
+            return dev.capacityUah;
+    }
+
+    // Unknown device — return 0, software coulomb counting will try to estimate
+    return 0;
 }

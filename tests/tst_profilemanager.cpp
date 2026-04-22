@@ -120,7 +120,7 @@ void TestProfileManager::testLoadDefaultProfiles()
 void TestProfileManager::testDefaultProfileCount()
 {
     m_manager->loadDefaultProfiles();
-    QCOMPARE(m_manager->profiles().size(), 7);
+    QCOMPARE(m_manager->profiles().size(), 8);
 }
 
 void TestProfileManager::testDefaultProfileIds()
@@ -461,7 +461,7 @@ void TestProfileManager::testLoadFromNonExistentFile()
 {
     // Loading from empty directory should fall back to defaults
     QVERIFY(m_manager->loadProfiles());
-    QCOMPARE(m_manager->profiles().size(), 7); // Default profiles
+    QCOMPARE(m_manager->profiles().size(), 8); // Default profiles
     QCOMPARE(m_manager->activeProfileId(), QStringLiteral("smartwatch_indoor"));
 }
 
@@ -476,7 +476,7 @@ void TestProfileManager::testLoadInvalidJson()
     
     // Should fall back to defaults
     QVERIFY(!m_manager->loadProfiles()); // Returns false but loads defaults
-    QCOMPARE(m_manager->profiles().size(), 7);
+    QCOMPARE(m_manager->profiles().size(), 8);
 }
 
 void TestProfileManager::testLoadWithMissingActiveProfile()

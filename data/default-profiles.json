@@ -9,6 +9,51 @@
     },
     "profiles": [
         {
+            "id": "max_battery",
+            "name": "Maximum Battery",
+            "icon": "ios-battery-dead",
+            "color": "#424242",
+            "builtin": true,
+            "sensors": {
+                "accelerometer": "off",
+                "gyroscope": "off",
+                "heart_rate": "off",
+                "hrv": "off",
+                "spo2": "off",
+                "barometer": "off",
+                "compass": "off",
+                "ambient_light": "off",
+                "gps": "off"
+            },
+            "radios": {
+                "ble": { "state": "off" },
+                "wifi": { "state": "off" },
+                "lte": { "state": "off" },
+                "nfc": { "state": "off" }
+            },
+            "system": {
+                "background_sync": "off",
+                "always_on_display": false,
+                "tilt_to_wake": false
+            },
+            "cpu": {
+                "governor": "powersave",
+                "max_cores": 1,
+                "screen_boost": false
+            },
+            "processes": {
+                "audio_enabled": false,
+                "pulseaudio": "stopped",
+                "btsyncd": "stopped",
+                "mce": "auto"
+            },
+            "automation": {
+                "battery_rules": [],
+                "time_rules": [],
+                "workout_profiles": {}
+            }
+        },
+        {
             "id": "ultra_saver_indoor",
             "name": "Ultra Saver – Indoor",
             "icon": "ios-battery-dead",
@@ -35,6 +80,17 @@
                 "background_sync": "off",
                 "always_on_display": false,
                 "tilt_to_wake": false
+            },
+            "cpu": {
+                "governor": "powersave",
+                "max_cores": 1,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": false,
+                "pulseaudio": "stopped",
+                "btsyncd": "stopped",
+                "mce": "auto"
             },
             "automation": {
                 "battery_rules": [],
@@ -75,6 +131,17 @@
                 "always_on_display": false,
                 "tilt_to_wake": true
             },
+            "cpu": {
+                "governor": "powersave",
+                "max_cores": 2,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": false,
+                "pulseaudio": "stopped",
+                "btsyncd": "auto",
+                "mce": "auto"
+            },
             "automation": {
                 "battery_rules": [],
                 "time_rules": [],
@@ -114,6 +181,17 @@
                 "always_on_display": false,
                 "tilt_to_wake": true
             },
+            "cpu": {
+                "governor": "auto",
+                "max_cores": 2,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": false,
+                "pulseaudio": "stopped",
+                "btsyncd": "auto",
+                "mce": "auto"
+            },
             "automation": {
                 "battery_rules": [],
                 "time_rules": [],
@@ -152,6 +230,17 @@
                 "background_sync": "when_radios_on",
                 "always_on_display": false,
                 "tilt_to_wake": true
+            },
+            "cpu": {
+                "governor": "auto",
+                "max_cores": 2,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": false,
+                "pulseaudio": "stopped",
+                "btsyncd": "auto",
+                "mce": "auto"
             },
             "automation": {
                 "battery_rules": [],
@@ -195,6 +284,17 @@
                 "always_on_display": true,
                 "tilt_to_wake": true
             },
+            "cpu": {
+                "governor": "auto",
+                "max_cores": 0,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": true,
+                "pulseaudio": "auto",
+                "btsyncd": "auto",
+                "mce": "auto"
+            },
             "automation": {
                 "battery_rules": [],
                 "time_rules": [],
@@ -232,6 +332,17 @@
                 "always_on_display": true,
                 "tilt_to_wake": true
             },
+            "cpu": {
+                "governor": "auto",
+                "max_cores": 0,
+                "screen_boost": true
+            },
+            "processes": {
+                "audio_enabled": true,
+                "pulseaudio": "auto",
+                "btsyncd": "auto",
+                "mce": "auto"
+            },
             "automation": {
                 "battery_rules": [],
                 "time_rules": [],
@@ -268,6 +379,17 @@
                 "background_sync": "auto",
                 "always_on_display": true,
                 "tilt_to_wake": true
+            },
+            "cpu": {
+                "governor": "performance",
+                "max_cores": 0,
+                "screen_boost": false
+            },
+            "processes": {
+                "audio_enabled": true,
+                "pulseaudio": "auto",
+                "btsyncd": "auto",
+                "mce": "auto"
             },
             "automation": {
                 "battery_rules": [],

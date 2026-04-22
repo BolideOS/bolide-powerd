@@ -245,6 +245,54 @@ inline BackgroundSyncMode bgSyncModeFromString(const QString &s)
     return BackgroundSyncMode::Auto;
 }
 
+// ─── CPU enums ──────────────────────────────────────────────────────────────
+
+enum class CpuGovernor { Auto, Performance, Schedutil, Ondemand, Powersave };
+
+inline QString cpuGovernorToString(CpuGovernor g)
+{
+    switch (g) {
+    case CpuGovernor::Auto:        return QStringLiteral("auto");
+    case CpuGovernor::Performance: return QStringLiteral("performance");
+    case CpuGovernor::Schedutil:   return QStringLiteral("schedutil");
+    case CpuGovernor::Ondemand:    return QStringLiteral("ondemand");
+    case CpuGovernor::Powersave:   return QStringLiteral("powersave");
+    }
+    return QStringLiteral("auto");
+}
+
+inline CpuGovernor cpuGovernorFromString(const QString &s)
+{
+    const QString v = s.toLower().trimmed();
+    if (v == QLatin1String("performance")) return CpuGovernor::Performance;
+    if (v == QLatin1String("schedutil"))   return CpuGovernor::Schedutil;
+    if (v == QLatin1String("ondemand"))    return CpuGovernor::Ondemand;
+    if (v == QLatin1String("powersave"))   return CpuGovernor::Powersave;
+    return CpuGovernor::Auto;
+}
+
+// ─── Process control enums ──────────────────────────────────────────────────
+
+enum class ServiceState { Auto, Started, Stopped };
+
+inline QString serviceStateToString(ServiceState s)
+{
+    switch (s) {
+    case ServiceState::Auto:    return QStringLiteral("auto");
+    case ServiceState::Started: return QStringLiteral("started");
+    case ServiceState::Stopped: return QStringLiteral("stopped");
+    }
+    return QStringLiteral("auto");
+}
+
+inline ServiceState serviceStateFromString(const QString &s)
+{
+    const QString v = s.toLower().trimmed();
+    if (v == QLatin1String("started")) return ServiceState::Started;
+    if (v == QLatin1String("stopped")) return ServiceState::Stopped;
+    return ServiceState::Auto;
+}
+
 // ─── Config structs ─────────────────────────────────────────────────────────
 
 struct SensorConfig {
@@ -319,6 +367,29 @@ struct SystemConfig {
     bool operator!=(const SystemConfig &o) const { return !(*this == o); }
 };
 
+struct CpuConfig {
+    CpuGovernor governor = CpuGovernor::Auto;
+    int max_cores = 0;          // 0 = auto (use boot-time default), 1-4 = limit
+    bool screen_boost = true;   // Temporarily boost CPU on screen wake
+
+    QJsonObject toJson() const;
+    static CpuConfig fromJson(const QJsonObject &obj);
+    bool operator==(const CpuConfig &o) const;
+    bool operator!=(const CpuConfig &o) const { return !(*this == o); }
+};
+
+struct ProcessConfig {
+    bool audio_enabled = true;       // Load/unload audio kernel modules
+    ServiceState pulseaudio = ServiceState::Auto;
+    ServiceState btsyncd    = ServiceState::Auto;
+    ServiceState mce        = ServiceState::Auto;
+
+    QJsonObject toJson() const;
+    static ProcessConfig fromJson(const QJsonObject &obj);
+    bool operator==(const ProcessConfig &o) const;
+    bool operator!=(const ProcessConfig &o) const { return !(*this == o); }
+};
+
 // ─── Automation structs ─────────────────────────────────────────────────────
 
 struct BatteryRule {
@@ -365,6 +436,8 @@ public:
     SensorConfig     sensors;
     RadioConfig      radios;
     SystemConfig     system;
+    CpuConfig        cpu;
+    ProcessConfig    processes;
     AutomationConfig automation;
 
     QJsonObject toJson() const;

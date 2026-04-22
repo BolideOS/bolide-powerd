@@ -566,6 +566,15 @@ void TestProfileModel::testPowerProfileJsonRoundTrip()
     original.system.tilt_to_wake = true;
     original.system.background_sync = BackgroundSyncMode::WhenRadiosOn;
     
+    original.cpu.governor = CpuGovernor::Powersave;
+    original.cpu.max_cores = 2;
+    original.cpu.screen_boost = false;
+    
+    original.processes.audio_enabled = false;
+    original.processes.pulseaudio = ServiceState::Stopped;
+    original.processes.btsyncd = ServiceState::Auto;
+    original.processes.mce = ServiceState::Auto;
+    
     BatteryRule br;
     br.threshold = 20;
     br.switch_to_profile = QStringLiteral("ultra_saver");
@@ -585,6 +594,11 @@ void TestProfileModel::testPowerProfileJsonRoundTrip()
     QCOMPARE(restored.radios.ble.state, RadioState::On);
     QCOMPARE(restored.radios.ble.interval_hours, 2);
     QCOMPARE(restored.system.always_on_display, true);
+    QCOMPARE(restored.cpu.governor, CpuGovernor::Powersave);
+    QCOMPARE(restored.cpu.max_cores, 2);
+    QCOMPARE(restored.cpu.screen_boost, false);
+    QCOMPARE(restored.processes.audio_enabled, false);
+    QCOMPARE(restored.processes.pulseaudio, ServiceState::Stopped);
     QCOMPARE(restored.automation.battery_rules.size(), 1);
     QCOMPARE(restored.automation.battery_rules[0].threshold, 20);
 }

@@ -149,6 +149,20 @@ int main(int argc, char *argv[])
             qInfo() << "Applied system config for profile" << name;
         }
 
+        // Apply CPU config
+        if (!systemController.applyCpuConfig(profile.cpu)) {
+            qWarning() << "Failed to apply CPU config for profile" << name;
+        } else {
+            qInfo() << "Applied CPU config for profile" << name;
+        }
+
+        // Apply process config
+        if (!systemController.applyProcessConfig(profile.processes)) {
+            qWarning() << "Failed to apply process config for profile" << name;
+        } else {
+            qInfo() << "Applied process config for profile" << name;
+        }
+
         // Notify SystemController of radio state so WhenRadiosOn btsyncd mode works
         bool radiosEnabled = (profile.radios.ble.state == RadioState::On);
         systemController.updateBackgroundSyncServices(profile.system.background_sync, radiosEnabled);
@@ -173,6 +187,15 @@ int main(int argc, char *argv[])
         qWarning() << "System error:" << component << "-" << error;
     });
 
+    // Connect MCE display state signal for screen-wake CPU boost
+    QDBusConnection::systemBus().connect(
+        QStringLiteral("com.nokia.mce"),
+        QStringLiteral("/com/nokia/mce/signal"),
+        QStringLiteral("com.nokia.mce.signal"),
+        QStringLiteral("display_status_ind"),
+        &systemController, SLOT(onDisplayStateChanged(QString)));
+    qInfo() << "Connected MCE display_status_ind for screen boost";
+
     // Apply initial profile configuration
     QString activeProfileId = profileManager.activeProfileId();
     PowerProfile activeProfile = profileManager.profile(activeProfileId);
@@ -181,6 +204,8 @@ int main(int argc, char *argv[])
         sensorController->applyConfig(activeProfile.sensors);
         radioController.applyConfig(activeProfile.radios);
         systemController.applyConfig(activeProfile.system);
+        systemController.applyCpuConfig(activeProfile.cpu);
+        systemController.applyProcessConfig(activeProfile.processes);
 
         // Sync radio state to SystemController for WhenRadiosOn btsyncd mode
         bool radiosOn = (activeProfile.radios.ble.state == RadioState::On);

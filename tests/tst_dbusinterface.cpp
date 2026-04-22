@@ -107,7 +107,7 @@ void TestDBusInterface::testGetProfilesReturnsJson()
 
     QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
     QVERIFY(doc.isArray());
-    QCOMPARE(doc.array().size(), 7); // 7 default profiles
+    QCOMPARE(doc.array().size(), 8); // 8 default profiles
 }
 
 void TestDBusInterface::testGetProfilesCacheHit()

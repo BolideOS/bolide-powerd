@@ -169,6 +169,63 @@ bool SystemConfig::operator==(const SystemConfig &o) const
         && tilt_to_wake       == o.tilt_to_wake;
 }
 
+// ─── CpuConfig ──────────────────────────────────────────────────────────────
+
+QJsonObject CpuConfig::toJson() const
+{
+    QJsonObject o;
+    o[QStringLiteral("governor")]     = cpuGovernorToString(governor);
+    o[QStringLiteral("max_cores")]    = max_cores;
+    o[QStringLiteral("screen_boost")] = screen_boost;
+    return o;
+}
+
+CpuConfig CpuConfig::fromJson(const QJsonObject &obj)
+{
+    CpuConfig c;
+    c.governor     = cpuGovernorFromString(obj.value(QStringLiteral("governor")).toString());
+    c.max_cores    = obj.value(QStringLiteral("max_cores")).toInt(0);
+    c.screen_boost = obj.value(QStringLiteral("screen_boost")).toBool(true);
+    return c;
+}
+
+bool CpuConfig::operator==(const CpuConfig &o) const
+{
+    return governor     == o.governor
+        && max_cores    == o.max_cores
+        && screen_boost == o.screen_boost;
+}
+
+// ─── ProcessConfig ──────────────────────────────────────────────────────────
+
+QJsonObject ProcessConfig::toJson() const
+{
+    QJsonObject o;
+    o[QStringLiteral("audio_enabled")] = audio_enabled;
+    o[QStringLiteral("pulseaudio")]    = serviceStateToString(pulseaudio);
+    o[QStringLiteral("btsyncd")]       = serviceStateToString(btsyncd);
+    o[QStringLiteral("mce")]           = serviceStateToString(mce);
+    return o;
+}
+
+ProcessConfig ProcessConfig::fromJson(const QJsonObject &obj)
+{
+    ProcessConfig c;
+    c.audio_enabled = obj.value(QStringLiteral("audio_enabled")).toBool(true);
+    c.pulseaudio    = serviceStateFromString(obj.value(QStringLiteral("pulseaudio")).toString());
+    c.btsyncd       = serviceStateFromString(obj.value(QStringLiteral("btsyncd")).toString());
+    c.mce           = serviceStateFromString(obj.value(QStringLiteral("mce")).toString());
+    return c;
+}
+
+bool ProcessConfig::operator==(const ProcessConfig &o) const
+{
+    return audio_enabled == o.audio_enabled
+        && pulseaudio    == o.pulseaudio
+        && btsyncd       == o.btsyncd
+        && mce           == o.mce;
+}
+
 // ─── BatteryRule ────────────────────────────────────────────────────────────
 
 QJsonObject BatteryRule::toJson() const
@@ -283,6 +340,8 @@ QJsonObject PowerProfile::toJson() const
     o[QStringLiteral("sensors")]    = sensors.toJson();
     o[QStringLiteral("radios")]     = radios.toJson();
     o[QStringLiteral("system")]     = system.toJson();
+    o[QStringLiteral("cpu")]        = cpu.toJson();
+    o[QStringLiteral("processes")]  = processes.toJson();
     o[QStringLiteral("automation")] = automation.toJson();
     return o;
 }
@@ -298,6 +357,8 @@ PowerProfile PowerProfile::fromJson(const QJsonObject &obj)
     p.sensors    = SensorConfig::fromJson(obj.value(QStringLiteral("sensors")).toObject());
     p.radios     = RadioConfig::fromJson(obj.value(QStringLiteral("radios")).toObject());
     p.system     = SystemConfig::fromJson(obj.value(QStringLiteral("system")).toObject());
+    p.cpu        = CpuConfig::fromJson(obj.value(QStringLiteral("cpu")).toObject());
+    p.processes  = ProcessConfig::fromJson(obj.value(QStringLiteral("processes")).toObject());
     p.automation = AutomationConfig::fromJson(obj.value(QStringLiteral("automation")).toObject());
     return p;
 }
@@ -317,5 +378,7 @@ bool PowerProfile::operator==(const PowerProfile &o) const
         && sensors    == o.sensors
         && radios     == o.radios
         && system     == o.system
+        && cpu        == o.cpu
+        && processes  == o.processes
         && automation == o.automation;
 }
