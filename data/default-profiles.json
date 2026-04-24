@@ -37,8 +37,8 @@
                 "tilt_to_wake": false
             },
             "cpu": {
-                "governor": "powersave",
-                "max_cores": 1,
+                "governor": "auto",
+                "max_cores": 0,
                 "screen_boost": false
             },
             "processes": {
@@ -82,8 +82,8 @@
                 "tilt_to_wake": false
             },
             "cpu": {
-                "governor": "powersave",
-                "max_cores": 1,
+                "governor": "auto",
+                "max_cores": 0,
                 "screen_boost": true
             },
             "processes": {
@@ -132,8 +132,8 @@
                 "tilt_to_wake": true
             },
             "cpu": {
-                "governor": "powersave",
-                "max_cores": 2,
+                "governor": "auto",
+                "max_cores": 0,
                 "screen_boost": true
             },
             "processes": {
@@ -183,7 +183,7 @@
             },
             "cpu": {
                 "governor": "auto",
-                "max_cores": 2,
+                "max_cores": 0,
                 "screen_boost": true
             },
             "processes": {
@@ -233,7 +233,7 @@
             },
             "cpu": {
                 "governor": "auto",
-                "max_cores": 2,
+                "max_cores": 0,
                 "screen_boost": true
             },
             "processes": {
@@ -381,7 +381,7 @@
                 "tilt_to_wake": true
             },
             "cpu": {
-                "governor": "performance",
+                "governor": "auto",
                 "max_cores": 0,
                 "screen_boost": false
             },

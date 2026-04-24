@@ -52,6 +52,8 @@ signals:
 private:
     bool setMceConfig(const QString &path, bool value);
     bool controlSystemdService(const QString &service, bool start);
+    bool controlUserService(const QString &service, bool start);
+    bool callUserSystemd(const QString &method, const QString &unit, const QString &mode);
     bool writeSysfs(const QString &path, const QString &value);
     QString readSysfs(const QString &path);
     QString detectBestGovernor();
@@ -59,7 +61,7 @@ private:
     // MCE D-Bus interface for display control
     QDBusInterface *m_mceRequest;
 
-    // systemd D-Bus for service control
+    // systemd D-Bus for system service control
     QDBusInterface *m_systemd;
 
     SystemConfig m_currentConfig;

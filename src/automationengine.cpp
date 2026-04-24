@@ -18,8 +18,11 @@ AutomationEngine::AutomationEngine(ProfileManager *pm, BatteryMonitor *bm, QObje
     connect(m_batteryMonitor, &BatteryMonitor::levelChanged,
             this, &AutomationEngine::onBatteryLevelChanged);
 
-    // Connect time check timer (60 second intervals)
+    // Time check timer — only used for time_rules (sleep schedules etc).
+    // Disabled: all profiles currently have empty time_rules, and polling
+    // every 60s prevents CPU suspend. Re-enable when time rules are needed.
     m_timeCheckTimer->setInterval(60000);
+    m_timeCheckTimer->setTimerType(Qt::CoarseTimer);
     connect(m_timeCheckTimer, &QTimer::timeout,
             this, &AutomationEngine::onTimeCheck);
 }
@@ -31,10 +34,11 @@ void AutomationEngine::start()
     // Initialize battery level tracking
     m_lastBatteryLevel = m_batteryMonitor->level();
     
-    // Start time check timer
-    m_timeCheckTimer->start();
+    // Time check timer is NOT started — no profiles use time_rules.
+    // Battery rules are event-driven via onBatteryLevelChanged.
+    // m_timeCheckTimer->start();
     
-    // Perform initial evaluation
+    // Perform initial evaluation (battery rules only)
     evaluateRules();
 }
 

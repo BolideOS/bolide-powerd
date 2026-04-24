@@ -39,6 +39,7 @@ SystemController::SystemController(QObject *parent)
     // Screen boost timer — restore CPU settings after boost period
     m_boostTimer.setSingleShot(true);
     m_boostTimer.setInterval(3000); // 3 seconds of boost on screen wake
+    m_boostTimer.setTimerType(Qt::CoarseTimer);
     connect(&m_boostTimer, &QTimer::timeout, this, [this]() {
         if (m_boosting) {
             m_boosting = false;
@@ -65,7 +66,7 @@ SystemController::SystemController(QObject *parent)
         qWarning() << "SystemController: Display control features will be unavailable";
     }
 
-    // Initialize systemd D-Bus interface
+    // Initialize system systemd D-Bus interface
     m_systemd = new QDBusInterface(
         SYSTEMD_SERVICE,
         SYSTEMD_PATH,
@@ -81,6 +82,10 @@ SystemController::SystemController(QObject *parent)
         qWarning() << "SystemController: systemd not available:" << m_systemd->lastError().message();
         qWarning() << "SystemController: Service control features will be unavailable";
     }
+
+    // User service control via busctl (QDBus cannot connect to user bus from root)
+    // Verified: busctl --user --address=unix:path=/run/user/1000/bus works from root
+    qDebug() << "SystemController: User service control via busctl";
 
     // Initialize current config to defaults
     m_currentConfig.background_sync = BackgroundSyncMode::Auto;
@@ -195,8 +200,8 @@ bool SystemController::setBackgroundSync(BackgroundSyncMode mode)
         break;
     }
 
-    // Control the btsyncd service
-    if (!controlSystemdService(BTSYNCD_SERVICE, shouldRun)) {
+    // Control the btsyncd service (user service)
+    if (!controlUserService(BTSYNCD_SERVICE, shouldRun)) {
         emit systemError(QStringLiteral("background_sync"),
                         QStringLiteral("Failed to control sync service"));
         return false;
@@ -297,6 +302,77 @@ bool SystemController::controlSystemdService(const QString &service, bool start)
     return true;
 }
 
+bool SystemController::controlUserService(const QString &service, bool start)
+{
+    const QString method = start ? QStringLiteral("StartUnit") : QStringLiteral("StopUnit");
+    const QString mode = QStringLiteral("replace");
+
+    qDebug() << "SystemController:" << (start ? "Starting" : "Stopping") << "user service" << service;
+
+    // When stopping a service, also stop its companion .socket unit
+    // to prevent socket-activation from restarting it.
+    if (!start && service.endsWith(QLatin1String(".service"))) {
+        QString socketUnit = service;
+        socketUnit.replace(QLatin1String(".service"), QLatin1String(".socket"));
+        callUserSystemd(QStringLiteral("StopUnit"), socketUnit, mode);
+        // Ignore errors — socket may not exist
+    }
+
+    bool ok = callUserSystemd(method, service, mode);
+    if (!ok) {
+        qWarning() << "SystemController: Failed to" << method << "user service" << service;
+        return false;
+    }
+
+    // When starting, also re-enable the companion socket
+    if (start && service.endsWith(QLatin1String(".service"))) {
+        QString socketUnit = service;
+        socketUnit.replace(QLatin1String(".service"), QLatin1String(".socket"));
+        callUserSystemd(QStringLiteral("StartUnit"), socketUnit, mode);
+    }
+
+    qDebug() << "SystemController: User service" << service << (start ? "started" : "stopped");
+    return true;
+}
+
+bool SystemController::callUserSystemd(const QString &method, const QString &unit, const QString &mode)
+{
+    // Use busctl to talk to the user bus from root
+    // busctl --user --address=unix:path=/run/user/1000/bus call \
+    //   org.freedesktop.systemd1 /org/freedesktop/systemd1 \
+    //   org.freedesktop.systemd1.Manager StartUnit ss "unit" "mode"
+    QProcess proc;
+    proc.setProgram(QStringLiteral("/usr/bin/busctl"));
+    proc.setArguments({
+        QStringLiteral("--user"),
+        QStringLiteral("--address=unix:path=/run/user/1000/bus"),
+        QStringLiteral("call"),
+        QStringLiteral("org.freedesktop.systemd1"),
+        QStringLiteral("/org/freedesktop/systemd1"),
+        QStringLiteral("org.freedesktop.systemd1.Manager"),
+        method,
+        QStringLiteral("ss"),
+        unit,
+        mode
+    });
+    proc.start();
+    if (!proc.waitForFinished(5000)) {
+        qWarning() << "SystemController: busctl timed out for" << method << unit;
+        return false;
+    }
+    if (proc.exitCode() != 0) {
+        QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        // NoSuchUnit is not a failure — service simply doesn't exist
+        if (err.contains(QLatin1String("NoSuchUnit"))) {
+            qDebug() << "SystemController: User unit" << unit << "does not exist (ok)";
+            return true;
+        }
+        qWarning() << "SystemController: busctl failed:" << err;
+        return false;
+    }
+    return true;
+}
+
 // ─── Display state handling ─────────────────────────────────────────────────
 
 void SystemController::onDisplayStateChanged(const QString &state)
@@ -312,9 +388,17 @@ bool SystemController::writeSysfs(const QString &path, const QString &value)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning() << "SystemController: Failed to open" << path << "for writing";
         return false;
     }
-    f.write(value.toUtf8());
+    qint64 written = f.write(value.toUtf8());
+    bool ok = f.flush();
+    if (written < 0 || !ok || f.error() != QFile::NoError) {
+        qWarning() << "SystemController: Failed to write" << value << "to" << path
+                   << "error:" << f.errorString();
+        f.close();
+        return false;
+    }
     f.close();
     return true;
 }
@@ -353,6 +437,15 @@ bool SystemController::setCpuGovernor(CpuGovernor governor)
     case CpuGovernor::Powersave:   govStr = QStringLiteral("powersave"); break;
     case CpuGovernor::Auto:        govStr = detectBestGovernor(); break;
     }
+    
+    // Validate that requested governor is actually available on this hardware
+    QString avail = readSysfs(QStringLiteral("/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"));
+    if (!avail.isEmpty() && !avail.contains(govStr)) {
+        QString fallback = detectBestGovernor();
+        qWarning() << "SystemController: Governor" << govStr << "not available (have:" << avail.trimmed()
+                   << "), falling back to" << fallback;
+        govStr = fallback;
+    }
 
     qDebug() << "SystemController: Setting CPU governor to" << govStr;
 
@@ -377,26 +470,55 @@ bool SystemController::setCpuGovernor(CpuGovernor governor)
 
 bool SystemController::setCpuMaxCores(int maxCores)
 {
-    // 0 = auto (all online), 1-4 = limit
-    qDebug() << "SystemController: Setting max cores to" << maxCores;
+    // 0 = auto (core_ctl manages hotplug), 1-4 = force exactly N cores
+    qDebug() << "SystemController: Setting max cores to" << maxCores
+             << (maxCores == 0 ? "(core_ctl auto)" : "(manual)");
 
     bool success = true;
-    QDir cpuDir(QStringLiteral("/sys/devices/system/cpu/"));
-    const auto entries = cpuDir.entryList({QStringLiteral("cpu[0-9]*")}, QDir::Dirs | QDir::NoDotAndDotDot);
+    const QString coreCtlBase = QStringLiteral("/sys/devices/system/cpu/cpu0/core_ctl/");
+    bool hasCoreCtl = QFile::exists(coreCtlBase + QStringLiteral("enable"));
 
-    for (const QString &cpuName : entries) {
-        QString onlinePath = QStringLiteral("/sys/devices/system/cpu/%1/online").arg(cpuName);
-        if (!QFile::exists(onlinePath)) continue; // cpu0 has no online file
+    if (maxCores == 0 && hasCoreCtl) {
+        // Auto mode: let core_ctl dynamically hotplug cores based on load
+        // First bring all cores online so core_ctl can manage them
+        QDir cpuDir(QStringLiteral("/sys/devices/system/cpu/"));
+        const auto entries = cpuDir.entryList({QStringLiteral("cpu[0-9]*")}, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &cpuName : entries) {
+            QString onlinePath = QStringLiteral("/sys/devices/system/cpu/%1/online").arg(cpuName);
+            if (!QFile::exists(onlinePath)) continue;
+            writeSysfs(onlinePath, QStringLiteral("1"));
+        }
 
-        int cpuNum = cpuName.midRef(3).toInt();
-        if (cpuNum == 0) continue; // Can't offline cpu0
+        // Configure core_ctl thresholds for responsive auto-scaling
+        writeSysfs(coreCtlBase + QStringLiteral("min_cpus"), QStringLiteral("1"));
+        writeSysfs(coreCtlBase + QStringLiteral("max_cpus"), QStringLiteral("4"));
+        writeSysfs(coreCtlBase + QStringLiteral("busy_up_thres"), QStringLiteral("60 60 60 60"));
+        writeSysfs(coreCtlBase + QStringLiteral("busy_down_thres"), QStringLiteral("25 25 25 25"));
+        writeSysfs(coreCtlBase + QStringLiteral("offline_delay_ms"), QStringLiteral("100"));
+        writeSysfs(coreCtlBase + QStringLiteral("enable"), QStringLiteral("1"));
+        qDebug() << "SystemController: core_ctl enabled (min=1, max=4, up=60%, down=25%)";
+    } else {
+        // Manual mode: disable core_ctl and force exactly N cores
+        if (hasCoreCtl) {
+            writeSysfs(coreCtlBase + QStringLiteral("enable"), QStringLiteral("0"));
+        }
 
-        bool shouldBeOnline = (maxCores <= 0) || (cpuNum < maxCores);
-        QString value = shouldBeOnline ? QStringLiteral("1") : QStringLiteral("0");
+        QDir cpuDir(QStringLiteral("/sys/devices/system/cpu/"));
+        const auto entries = cpuDir.entryList({QStringLiteral("cpu[0-9]*")}, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &cpuName : entries) {
+            QString onlinePath = QStringLiteral("/sys/devices/system/cpu/%1/online").arg(cpuName);
+            if (!QFile::exists(onlinePath)) continue;
 
-        if (!writeSysfs(onlinePath, value)) {
-            qWarning() << "SystemController: Failed to set" << cpuName << "online=" << value;
-            success = false;
+            int cpuNum = cpuName.midRef(3).toInt();
+            if (cpuNum == 0) continue;
+
+            bool shouldBeOnline = (maxCores <= 0) || (cpuNum < maxCores);
+            QString value = shouldBeOnline ? QStringLiteral("1") : QStringLiteral("0");
+
+            if (!writeSysfs(onlinePath, value)) {
+                qWarning() << "SystemController: Failed to set" << cpuName << "online=" << value;
+                success = false;
+            }
         }
     }
 
@@ -421,7 +543,7 @@ bool SystemController::applyCpuConfig(const CpuConfig &config)
         }
     }
 
-    if (config.max_cores != m_currentCpuConfig.max_cores) {
+    if (config.max_cores != m_currentCpuConfig.max_cores || config.max_cores == 0) {
         if (!setCpuMaxCores(config.max_cores)) {
             success = false;
         }
@@ -449,9 +571,9 @@ void SystemController::triggerScreenBoost()
     m_preBoostGovernor = m_currentCpuConfig.governor;
     m_preBoostCores = m_currentCpuConfig.max_cores;
 
-    // Temporarily boost: performance governor, all cores online
+    // Temporarily boost: performance governor, all cores forced online
     setCpuGovernor(CpuGovernor::Performance);
-    setCpuMaxCores(0); // all cores
+    setCpuMaxCores(4); // force all 4 cores online during boost
     m_boostTimer.start();
 }
 
@@ -505,22 +627,53 @@ bool SystemController::applyProcessConfig(const ProcessConfig &config)
         setAudioModules(config.audio_enabled);
     }
 
-    // PulseAudio
+    // PulseAudio (user service)
     if (config.pulseaudio != m_currentProcessConfig.pulseaudio) {
         bool shouldRun = (config.pulseaudio == ServiceState::Auto) || 
                          (config.pulseaudio == ServiceState::Started);
-        controlSystemdService(QStringLiteral("pulseaudio.service"), shouldRun);
+        controlUserService(QStringLiteral("pulseaudio.service"), shouldRun);
+        if (!shouldRun) {
+            // Also kill any autospawned PA instances (libpulse --start bypasses systemd)
+            QProcess::execute(QStringLiteral("/usr/bin/killall"), {QStringLiteral("-q"), QStringLiteral("pulseaudio")});
+        }
     }
 
     // btsyncd — note: background_sync in SystemConfig also controls this,
-    // but ProcessConfig gives explicit override
+    // but ProcessConfig gives explicit override (user service)
     if (config.btsyncd != m_currentProcessConfig.btsyncd) {
         if (config.btsyncd == ServiceState::Stopped) {
-            controlSystemdService(QStringLiteral("asteroid-btsyncd.service"), false);
+            controlUserService(QStringLiteral("asteroid-btsyncd.service"), false);
         } else if (config.btsyncd == ServiceState::Started) {
-            controlSystemdService(QStringLiteral("asteroid-btsyncd.service"), true);
+            controlUserService(QStringLiteral("asteroid-btsyncd.service"), true);
         }
         // Auto = let background_sync handle it
+    }
+
+    // sensorfwd (system service — controls sensor hub hardware)
+    if (config.sensorfwd != m_currentProcessConfig.sensorfwd) {
+        bool shouldRun = (config.sensorfwd == ServiceState::Auto) ||
+                         (config.sensorfwd == ServiceState::Started);
+
+        if (shouldRun) {
+            // Unmask first so systemd can start it, then start
+            QProcess::execute(QStringLiteral("/bin/systemctl"),
+                {QStringLiteral("unmask"), QStringLiteral("sensorfwd.service")});
+            controlSystemdService(QStringLiteral("sensorfwd.service"), true);
+        } else {
+            // sensorfwd ignores SIGTERM, so kill it directly and mask to prevent restart
+            QProcess::execute(QStringLiteral("/usr/bin/killall"), {QStringLiteral("-9"), QStringLiteral("sensorfwd")});
+            QProcess::execute(QStringLiteral("/bin/systemctl"),
+                {QStringLiteral("mask"), QStringLiteral("sensorfwd.service")});
+            qDebug() << "SystemController: sensorfwd killed and masked";
+        }
+
+        // Also control Oppo's deamonserver (sensor hub HAL daemon) which holds
+        // /dev/snshub_data open and generates ~1 wakeup/sec via ws_std_sns.
+        // It's an Android init service, controlled via setprop ctl.start/stop.
+        QProcess::execute(QStringLiteral("/usr/bin/setprop"),
+            {shouldRun ? QStringLiteral("ctl.start") : QStringLiteral("ctl.stop"),
+             QStringLiteral("deamonserver")});
+        qDebug() << "SystemController: deamonserver" << (shouldRun ? "started" : "stopped") << "via setprop";
     }
 
     m_currentProcessConfig = config;

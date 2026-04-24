@@ -329,3 +329,15 @@ QStringList SysfsBackend::availableSensors() const
 {
     return m_sensors.keys();
 }
+
+int SysfsBackend::lastHeartRate() const
+{
+    // Sysfs backend has no HR sensor paths on beluga (HR is via SensorFW only)
+    return -1;
+}
+
+qint64 SysfsBackend::lastStepCount() const
+{
+    // Sysfs backend has no step counter paths on beluga (steps via SensorFW only)
+    return -1;
+}

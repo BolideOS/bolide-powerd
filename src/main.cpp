@@ -14,6 +14,9 @@
 #include "radiocontroller.h"
 #include "systemcontroller.h"
 #include "automationengine.h"
+#include "healthstore.h"
+#include "healthmonitor.h"
+#include "microcoresync.h"
 #include "common.h"
 
 // Global pointer for signal handler
@@ -102,6 +105,11 @@ int main(int argc, char *argv[])
     qInfo() << "System controller initialized, MCE available:" << systemController.isMceAvailable()
             << "systemd available:" << systemController.isSystemdAvailable();
 
+    // Health monitoring
+    QString healthDbPath = configDir + QLatin1String("/health.db");
+    HealthStore healthStore(healthDbPath);
+    HealthMonitor healthMonitor(&healthStore, sensorController, configDir);
+
     // Automation engine
     AutomationEngine automationEngine(&profileManager, &batteryMonitor);
 
@@ -128,12 +136,10 @@ int main(int argc, char *argv[])
             return;
         }
 
-        // Apply sensor config
-        if (!sensorController->applyConfig(profile.sensors)) {
-            qWarning() << "Failed to apply sensor config for profile" << name;
-        } else {
-            qInfo() << "Applied sensor config for profile" << name;
-        }
+        // Notify health monitor of profile change (calculates and emits effective config)
+        healthMonitor.onProfileChanged(profile.sensors);
+
+        // Sensor config is applied via effectiveSensorConfigChanged signal handler
 
         // Apply radio config
         if (!radioController.applyConfig(profile.radios)) {
@@ -196,12 +202,38 @@ int main(int argc, char *argv[])
         &systemController, SLOT(onDisplayStateChanged(QString)));
     qInfo() << "Connected MCE display_status_ind for screen boost";
 
+    // Connect MCE display state to battery monitor for screen-aware polling
+    QDBusConnection::systemBus().connect(
+        QStringLiteral("com.nokia.mce"),
+        QStringLiteral("/com/nokia/mce/signal"),
+        QStringLiteral("com.nokia.mce.signal"),
+        QStringLiteral("display_status_ind"),
+        &batteryMonitor, SLOT(onDisplayStateChanged(QString)));
+    qInfo() << "Connected MCE display_status_ind for battery polling";
+
+    // Connect MCE display state to health monitor
+    QDBusConnection::systemBus().connect(
+        QStringLiteral("com.nokia.mce"),
+        QStringLiteral("/com/nokia/mce/signal"),
+        QStringLiteral("com.nokia.mce.signal"),
+        QStringLiteral("display_status_ind"),
+        &healthMonitor, SLOT(onDisplayStateChanged(QString)));
+    qInfo() << "Connected MCE display_status_ind for health monitor";
+
+    // When health monitor changes effective sensor config, re-apply it
+    QObject::connect(&healthMonitor, &HealthMonitor::effectiveSensorConfigChanged,
+                     [&sensorController](const SensorConfig &effective) {
+        sensorController->applyConfig(effective);
+    });
+
     // Apply initial profile configuration
     QString activeProfileId = profileManager.activeProfileId();
     PowerProfile activeProfile = profileManager.profile(activeProfileId);
     if (!activeProfile.id.isEmpty()) {
         qInfo() << "Applying initial profile:" << activeProfile.name;
-        sensorController->applyConfig(activeProfile.sensors);
+        SensorConfig effectiveInitSensors = healthMonitor.settings().effectiveSensorConfig(activeProfile.sensors);
+        sensorController->applyConfig(effectiveInitSensors);
+        healthMonitor.onProfileChanged(activeProfile.sensors);
         radioController.applyConfig(activeProfile.radios);
         systemController.applyConfig(activeProfile.system);
         systemController.applyCpuConfig(activeProfile.cpu);
@@ -221,7 +253,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    DBusInterface dbusIface(&profileManager, &batteryMonitor);
+    DBusInterface dbusIface(&profileManager, &batteryMonitor, &healthMonitor, &healthStore);
 
     // Relay battery changes to D-Bus signal (must be after dbusIface construction)
     QObject::connect(&batteryMonitor, &BatteryMonitor::significantChange,
@@ -247,6 +279,31 @@ int main(int argc, char *argv[])
     qInfo() << "Total profiles:" << profileManager.profiles().size();
     qInfo() << "Battery level:" << batteryMonitor.level() << "%";
 
+    // Start health monitoring
+    healthMonitor.start();
+
+    // ── Microcore phone-companion GATT server ──────────────────────────────
+    // Profile-gated: only advertises when the active profile has BLE enabled.
+    // Never turns sensors on — only reads from HealthStore.
+    MicrocoreSync microcoreSync(&healthStore, &batteryMonitor, configDir);
+    if (!microcoreSync.start()) {
+        qWarning() << "MicrocoreSync: failed to start (Bluetooth not available?)";
+    } else {
+        auto applyBleGate = [&microcoreSync](const PowerProfile &p) {
+            const bool bleOn = (p.radios.ble.state == RadioState::On);
+            microcoreSync.setBleAllowed(bleOn);
+        };
+        // Initial gating based on currently-active profile.
+        if (!activeProfile.id.isEmpty()) applyBleGate(activeProfile);
+
+        // Re-gate whenever the active profile changes.
+        QObject::connect(&profileManager, &ProfileManager::activeProfileChanged,
+                         [&profileManager, applyBleGate](const QString &id, const QString &) {
+            const PowerProfile p = profileManager.profile(id);
+            if (!p.id.isEmpty()) applyBleGate(p);
+        });
+    }
+
     // Start automation after everything is wired up
     automationEngine.start();
 
@@ -254,6 +311,7 @@ int main(int argc, char *argv[])
 
     // Cleanup
     automationEngine.stop();
+    healthMonitor.stop();
     batteryMonitor.stop();
     
     bus.unregisterObject(QLatin1String(POWERD_PATH));

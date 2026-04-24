@@ -204,6 +204,7 @@ QJsonObject ProcessConfig::toJson() const
     o[QStringLiteral("audio_enabled")] = audio_enabled;
     o[QStringLiteral("pulseaudio")]    = serviceStateToString(pulseaudio);
     o[QStringLiteral("btsyncd")]       = serviceStateToString(btsyncd);
+    o[QStringLiteral("sensorfwd")]     = serviceStateToString(sensorfwd);
     o[QStringLiteral("mce")]           = serviceStateToString(mce);
     return o;
 }
@@ -214,6 +215,7 @@ ProcessConfig ProcessConfig::fromJson(const QJsonObject &obj)
     c.audio_enabled = obj.value(QStringLiteral("audio_enabled")).toBool(true);
     c.pulseaudio    = serviceStateFromString(obj.value(QStringLiteral("pulseaudio")).toString());
     c.btsyncd       = serviceStateFromString(obj.value(QStringLiteral("btsyncd")).toString());
+    c.sensorfwd     = serviceStateFromString(obj.value(QStringLiteral("sensorfwd")).toString());
     c.mce           = serviceStateFromString(obj.value(QStringLiteral("mce")).toString());
     return c;
 }
@@ -223,6 +225,7 @@ bool ProcessConfig::operator==(const ProcessConfig &o) const
     return audio_enabled == o.audio_enabled
         && pulseaudio    == o.pulseaudio
         && btsyncd       == o.btsyncd
+        && sensorfwd     == o.sensorfwd
         && mce           == o.mce;
 }
 

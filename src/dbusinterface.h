@@ -8,6 +8,8 @@
 #include <QDBusAbstractAdaptor>
 #include "profilemanager.h"
 #include "batterymonitor.h"
+#include "healthmonitor.h"
+#include "healthstore.h"
 #include "common.h"
 
 class DBusInterface : public QDBusAbstractAdaptor
@@ -16,7 +18,8 @@ class DBusInterface : public QDBusAbstractAdaptor
     Q_CLASSINFO("D-Bus Interface", POWERD_INTERFACE)
 
 public:
-    explicit DBusInterface(ProfileManager *pm, BatteryMonitor *bm);
+    explicit DBusInterface(ProfileManager *pm, BatteryMonitor *bm,
+                           HealthMonitor *hm = nullptr, HealthStore *hs = nullptr);
 
 public Q_SLOTS:
     // Profile management
@@ -40,6 +43,20 @@ public Q_SLOTS:
     QString GetBatteryHealth();
     QString GetCurrentState();
 
+    // Charge limit (battery protection)
+    bool GetChargeLimitEnabled();
+    int GetChargeLimitPercent();
+    bool SetChargeLimitEnabled(bool enabled);
+    bool SetChargeLimitPercent(int percent);
+
+    // ── Health monitoring ─────────────────────────────────────────────
+    QString GetHealthSettings();
+    bool SetHealthSettings(const QString &settingsJson);
+    QString GetHealthData(const QString &metric, qint64 fromTs, qint64 toTs);
+    QString GetHealthDataAggregated(const QString &metric, qint64 fromTs,
+                                    qint64 toTs, int bucketMinutes);
+    QString GetHealthLatest(const QString &metric, int count);
+
     // ── Sensor access coordination ─────────────────────────────────────
     // Called by fitness/health apps to ensure a sensor stays active at the
     // requested minimum sampling interval.  Powerd will not down-clock
@@ -56,8 +73,11 @@ Q_SIGNALS:
     void WorkoutStopped();
     void BatteryLevelChanged(int level, bool charging);
     void BatteryHealthChanged(int healthPercent, int learnedMah, int designMah);
+    void ChargeLimitChanged(bool enabled, int percent);
     void SensorAccessGranted(const QString &sensorName, int effectiveIntervalMs);
     void SensorAccessReleased(const QString &sensorName);
+    void HealthSettingsChanged(const QString &settingsJson);
+    void HealthDataUpdated(const QString &metric);
 
 private Q_SLOTS:
     void onProfileManagerActiveProfileChanged(const QString &id, const QString &name);
@@ -66,6 +86,8 @@ private Q_SLOTS:
 private:
     ProfileManager *m_profileManager;
     BatteryMonitor *m_batteryMonitor;
+    HealthMonitor *m_healthMonitor;
+    HealthStore *m_healthStore;
     QString m_previousProfileId;
     QString m_activeWorkoutType;
     bool m_workoutActive;

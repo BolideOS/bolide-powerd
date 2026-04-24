@@ -8,6 +8,9 @@ set(POWERD_CORE_SOURCES
     radiocontroller.cpp
     systemcontroller.cpp
     automationengine.cpp
+    healthstore.cpp
+    healthmonitor.cpp
+    microcoresync.cpp
 )
 
 set(POWERD_CORE_HEADERS
@@ -21,11 +24,19 @@ set(POWERD_CORE_HEADERS
     radiocontroller.h
     systemcontroller.h
     automationengine.h
+    healthstore.h
+    healthmonitor.h
+    microcoresync.h
 )
 
+# Qt5Bluetooth is required for the phone-companion GATT peripheral. It is a
+# stock Qt 5 module shipped in meta-qt5 (qtconnectivity). Keep it in the core
+# library so unit tests can exercise the sync code without the daemon.
+find_package(Qt5Bluetooth REQUIRED)
+
 add_library(powerd-core STATIC ${POWERD_CORE_SOURCES} ${POWERD_CORE_HEADERS})
-target_include_directories(powerd-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(powerd-core PUBLIC Qt5::Core Qt5::DBus)
+target_link_libraries(powerd-core PUBLIC Qt5::Core Qt5::DBus Qt5::Bluetooth ${SQLITE3_LIBRARIES})
+target_include_directories(powerd-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${SQLITE3_INCLUDE_DIRS})
 
 # Daemon executable
 add_executable(bolide-powerd

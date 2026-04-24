@@ -382,6 +382,7 @@ struct ProcessConfig {
     bool audio_enabled = true;       // Load/unload audio kernel modules
     ServiceState pulseaudio = ServiceState::Auto;
     ServiceState btsyncd    = ServiceState::Auto;
+    ServiceState sensorfwd  = ServiceState::Auto;
     ServiceState mce        = ServiceState::Auto;
 
     QJsonObject toJson() const;

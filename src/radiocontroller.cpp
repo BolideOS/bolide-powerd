@@ -11,6 +11,7 @@ RadioController::RadioController(QObject *parent)
     , m_bluezProperties(nullptr)
     , m_connmanManager(nullptr)
     , m_connmanTechnology(nullptr)
+    , m_connmanBtTechnology(nullptr)
     , m_neardManager(nullptr)
     , m_syncTimer(new QTimer(this))
     , m_sleepMode(false)
@@ -72,6 +73,19 @@ RadioController::RadioController(QObject *parent)
         if (!m_connmanTechnology->isValid()) {
             qWarning() << "RadioController: WiFi technology interface not available";
         }
+        
+        // Get Bluetooth technology interface
+        m_connmanBtTechnology = new QDBusInterface(
+            "net.connman",
+            "/net/connman/technology/bluetooth",
+            "net.connman.Technology",
+            systemBus,
+            this
+        );
+        
+        if (!m_connmanBtTechnology->isValid()) {
+            qWarning() << "RadioController: Bluetooth technology interface not available";
+        }
     } else {
         qWarning() << "RadioController: ConnMan not available:" << m_connmanManager->lastError().message();
     }
@@ -93,6 +107,7 @@ RadioController::RadioController(QObject *parent)
     }
     
     // Connect sync timer
+    m_syncTimer->setTimerType(Qt::CoarseTimer);
     connect(m_syncTimer, &QTimer::timeout, this, &RadioController::onSyncTimer);
 }
 
@@ -139,14 +154,35 @@ RadioConfig RadioController::currentConfig() const
 
 bool RadioController::setBleState(bool enabled)
 {
+    // Use ConnMan to control Bluetooth power — this keeps BlueZ and ConnMan in sync.
+    // Bypassing ConnMan and talking to BlueZ directly causes state desync.
+    if (m_connmanAvailable && m_connmanBtTechnology && m_connmanBtTechnology->isValid()) {
+        qDebug() << "RadioController: Setting BLE to" << (enabled ? "enabled" : "disabled") << "via ConnMan";
+        
+        QDBusReply<void> reply = m_connmanBtTechnology->call(
+            "SetProperty",
+            "Powered",
+            QVariant::fromValue(QDBusVariant(enabled))
+        );
+        
+        if (!reply.isValid()) {
+            qWarning() << "RadioController: Failed to set BLE state via ConnMan:" << reply.error().message();
+            emit radioError("ble", reply.error().message());
+            return false;
+        }
+        
+        qDebug() << "RadioController: BLE" << (enabled ? "enabled" : "disabled");
+        return true;
+    }
+    
+    // Fallback to BlueZ direct if ConnMan BT technology is unavailable
     if (!m_bluezAvailable || !m_bluezProperties || !m_bluezProperties->isValid()) {
-        qWarning() << "RadioController: BlueZ not available, cannot set BLE state";
+        qWarning() << "RadioController: Neither ConnMan BT nor BlueZ available, cannot set BLE state";
         return false;
     }
     
-    qDebug() << "RadioController: Setting BLE to" << (enabled ? "enabled" : "disabled");
+    qWarning() << "RadioController: ConnMan BT unavailable, falling back to BlueZ direct (state may desync)";
     
-    // Set Powered property via org.freedesktop.DBus.Properties interface
     QDBusReply<void> reply = m_bluezProperties->call(
         "Set",
         "org.bluez.Adapter1",
@@ -160,7 +196,7 @@ bool RadioController::setBleState(bool enabled)
         return false;
     }
     
-    qDebug() << "RadioController: BLE" << (enabled ? "enabled" : "disabled");
+    qDebug() << "RadioController: BLE" << (enabled ? "enabled" : "disabled") << "(BlueZ fallback)";
     return true;
 }
 

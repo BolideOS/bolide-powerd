@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QDateTime>
 #include <QDebug>
+#include <QFileInfo>
 #include <QDataStream>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -35,6 +36,12 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
     , m_coulombLastMs(0)
     , m_coulombEstimateCount(0)
     , m_chargeFullAvailable(false)
+    , m_chargeLimitEnabled(false)
+    , m_chargeLimitPercent(90)
+    , m_chargingSuspended(false)
+    , m_usbUnplugTimer(new QTimer(this))
+    , m_usbWakeupDisabled(false)
+    , m_screenOn(true)
 {
     discoverPowerSupplySources();
 
@@ -42,11 +49,30 @@ BatteryMonitor::BatteryMonitor(const QString &configDir, QObject *parent)
         qWarning() << "BatteryMonitor: No battery power supply found, using defaults";
     }
 
+    // Discover input_suspend path for charge limiting
+    if (!m_powerSupplyPath.isEmpty()) {
+        QString isp = m_powerSupplyPath + QStringLiteral("/input_suspend");
+        QFileInfo fi(isp);
+        if (fi.exists() && fi.isWritable()) {
+            m_inputSuspendPath = isp;
+            qDebug() << "BatteryMonitor: Charge limit available via" << isp;
+        }
+    }
+
+    m_pollTimer->setTimerType(Qt::CoarseTimer);
+    m_heartbeatTimer->setTimerType(Qt::CoarseTimer);
     connect(m_pollTimer, &QTimer::timeout, this, &BatteryMonitor::pollBattery);
     connect(m_heartbeatTimer, &QTimer::timeout, this, &BatteryMonitor::heartbeat);
 
+    // USB unplug timer: disable USB wakeup 15s after cable removal
+    m_usbUnplugTimer->setSingleShot(true);
+    m_usbUnplugTimer->setInterval(15000);
+    m_usbUnplugTimer->setTimerType(Qt::CoarseTimer);
+    connect(m_usbUnplugTimer, &QTimer::timeout, this, &BatteryMonitor::onUsbUnplugTimeout);
+
     loadHistory();
     loadHealthData();
+    loadSettings();
 }
 
 void BatteryMonitor::start()
@@ -65,6 +91,20 @@ void BatteryMonitor::stop()
 {
     m_pollTimer->stop();
     m_heartbeatTimer->stop();
+    m_usbUnplugTimer->stop();
+
+    // Always resume charging on shutdown so a crashed/stopped powerd
+    // doesn't leave the battery unable to charge.
+    if (m_chargingSuspended) {
+        writeInputSuspend(false);
+        m_chargingSuspended = false;
+    }
+
+    // Always re-enable USB wakeup so the system can wake on cable insertion
+    if (m_usbWakeupDisabled) {
+        setUsbWakeup(true);
+    }
+
     saveHistory();
     saveHealthData();
 }
@@ -328,6 +368,22 @@ void BatteryMonitor::pollBattery()
 
     if (m_charging != prevCharging) {
         emit chargingChanged(m_charging);
+
+        // USB wakeup control: when cable is unplugged, start timer to disable
+        // the USB controller wakelock. When plugged back in, cancel and re-enable.
+        if (!m_charging) {
+            // Unplugged — start countdown to disable USB wakeup
+            if (!m_usbUnplugTimer->isActive()) {
+                qDebug() << "BatteryMonitor: USB unplugged, will disable wakeup in 15s";
+                m_usbUnplugTimer->start();
+            }
+        } else {
+            // Plugged in — cancel pending disable and re-enable USB wakeup
+            m_usbUnplugTimer->stop();
+            if (m_usbWakeupDisabled) {
+                setUsbWakeup(true);
+            }
+        }
     }
 
     if (qAbs(m_level - m_lastRecordedLevel) >= BATTERY_CHANGE_THRESHOLD) {
@@ -338,15 +394,76 @@ void BatteryMonitor::pollBattery()
     if (m_level != prevLevel || m_charging != prevCharging) {
         emit significantChange(m_level, m_charging);
     }
+
+    // Enforce charge limit after level/charging updates
+    enforceChargeLimit();
 }
 
 void BatteryMonitor::heartbeat()
 {
+    // Skip the heartbeat entirely if screen is off, not charging, and not
+    // in a workout. The next screen-on or charge-plug event will trigger
+    // a full poll + record anyway, so we lose at most one 2-hour data
+    // point — acceptable to let the CPU stay in deep sleep.
+    if (!m_screenOn && !m_charging && !m_workoutActive) {
+        qDebug() << "BatteryMonitor: Heartbeat skipped (screen off, idle)";
+        return;
+    }
+
     readBatteryHealth();
     recordEntry();
     m_lastRecordedLevel = m_level;
     saveHistory();
     saveHealthData();
+}
+
+// ─── Screen-aware battery polling ───────────────────────────────────────────
+
+void BatteryMonitor::onDisplayStateChanged(const QString &state)
+{
+    bool wasOn = m_screenOn;
+    m_screenOn = (state == QLatin1String("on"));
+
+    if (m_screenOn && !wasOn) {
+        // Screen just turned on — do an immediate poll so UI has fresh data,
+        // then resume the timer
+        pollBattery();
+        if (!m_pollTimer->isActive()) {
+            int interval = m_workoutActive ? BATTERY_POLL_ACTIVE_MS : BATTERY_POLL_IDLE_MS;
+            m_pollTimer->start(interval);
+            qDebug() << "BatteryMonitor: Screen on — resumed polling at" << interval << "ms";
+        }
+    } else if (!m_screenOn && wasOn && !m_workoutActive && !m_charging) {
+        // Screen off, not in workout, not charging — stop polling to let CPU suspend.
+        // Charge limit enforcement is not needed when not charging.
+        // Heartbeat timer (2h) still runs for history recording.
+        m_pollTimer->stop();
+        qDebug() << "BatteryMonitor: Screen off — stopped polling (heartbeat continues)";
+    }
+    // If charging or workout active, keep polling even with screen off
+    // so charge limit and coulomb counting continue working.
+}
+
+// ─── USB wakeup control ────────────────────────────────────────────────────
+
+void BatteryMonitor::onUsbUnplugTimeout()
+{
+    // Double-check we're still unplugged before disabling
+    if (!m_charging) {
+        setUsbWakeup(false);
+    }
+}
+
+void BatteryMonitor::setUsbWakeup(bool enabled)
+{
+    QFile f(QString::fromLatin1(USB_WAKEUP_PATH));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+        return;
+
+    f.write(enabled ? "enabled" : "disabled");
+    f.close();
+    m_usbWakeupDisabled = !enabled;
+    qDebug() << "BatteryMonitor: USB wakeup" << (enabled ? "enabled" : "disabled");
 }
 
 void BatteryMonitor::readBatteryLevel()
@@ -416,21 +533,50 @@ void BatteryMonitor::readBatteryHealth()
 
     int prevHealth = healthPercent();
 
-    // Read design capacity — prefer known-good table over unreliable BMS values.
-    // Many fuel gauges (e.g. PMI632/QG) report charge_full_design = charge_full
-    // (the learned FCC) rather than the original cell design capacity, making
-    // health always appear as 100%.  If we have a known entry, trust it.
-    int designUah = knownDesignCapacityUah();
-    if (designUah <= 0) {
-        designUah = readBestSource("charge_full_design");
-        if (designUah <= 0) {
-            // Some drivers use energy-based (µWh) instead of charge-based (µAh)
-            int designUwh = readBestSource("energy_full_design");
-            int voltageUv = readBestSource("voltage_max_design");
-            if (voltageUv <= 0) voltageUv = readBestSource("voltage_now");
-            if (designUwh > 0 && voltageUv > 0)
-                designUah = (int)((double)designUwh / voltageUv * 1000000.0);
+    // Read design capacity.
+    // Strategy: prefer hardware charge_full_design when it looks trustworthy.
+    // Some fuel gauges (e.g. PMI632/QG) report charge_full_design = charge_full
+    // (the learned FCC) making health always appear 100%.  In that case, fall back
+    // to our known-device table.  But if the hardware reports a real design value
+    // that differs from charge_full, trust it — it knows the actual cell rating.
+    int hwDesignUah = readBestSource("charge_full_design");
+    if (hwDesignUah <= 0) {
+        // Some drivers use energy-based (µWh) instead of charge-based (µAh)
+        int designUwh = readBestSource("energy_full_design");
+        int voltageUv = readBestSource("voltage_max_design");
+        if (voltageUv <= 0) voltageUv = readBestSource("voltage_now");
+        if (designUwh > 0 && voltageUv > 0)
+            hwDesignUah = (int)((double)designUwh / voltageUv * 1000000.0);
+    }
+
+    int knownUah = knownDesignCapacityUah();
+    int designUah = 0;
+
+    if (hwDesignUah > 100000) {
+        // Hardware provides a value.  Check if it's just echoing charge_full.
+        int chargeFullSniff = readBestSource("charge_full");
+        bool likelyEcho = (chargeFullSniff > 0 && hwDesignUah == chargeFullSniff);
+
+        if (likelyEcho && knownUah > 0) {
+            // FG reports charge_full_design == charge_full.  This could mean:
+            // (a) FG echoing learned FCC as design (common on PMI632/QG), or
+            // (b) Battery is at full health and hasn't degraded yet.
+            // If the known table value is close (within 20%), use the table
+            // since it may account for a larger actual cell.  If the table value
+            // is far off (>20%), it's probably for a different hardware variant
+            // (e.g. 41mm vs 46mm) — trust the hardware.
+            double ratio = (double)knownUah / hwDesignUah;
+            if (ratio >= 0.8 && ratio <= 1.2) {
+                designUah = knownUah;
+            } else {
+                designUah = hwDesignUah;
+            }
+        } else {
+            // Hardware charge_full_design looks real — trust it
+            designUah = hwDesignUah;
         }
+    } else if (knownUah > 0) {
+        designUah = knownUah;
     }
     if (designUah > 0)
         m_designCapacityUah = designUah;
@@ -992,4 +1138,125 @@ int BatteryMonitor::knownDesignCapacityUah() const
 
     // Unknown device — return 0, software coulomb counting will try to estimate
     return 0;
+}
+
+// ─── Charge limit (battery protection) ──────────────────────────────────────
+
+bool BatteryMonitor::chargeLimitEnabled() const { return m_chargeLimitEnabled; }
+int BatteryMonitor::chargeLimitPercent() const { return m_chargeLimitPercent; }
+
+void BatteryMonitor::setChargeLimitEnabled(bool enabled)
+{
+    if (enabled == m_chargeLimitEnabled) return;
+    m_chargeLimitEnabled = enabled;
+    qInfo() << "BatteryMonitor: Charge limit" << (enabled ? "enabled" : "disabled")
+            << "at" << m_chargeLimitPercent << "%";
+
+    // If disabling, immediately resume charging
+    if (!enabled && m_chargingSuspended) {
+        writeInputSuspend(false);
+        m_chargingSuspended = false;
+    }
+
+    saveSettings();
+    emit chargeLimitChanged(m_chargeLimitEnabled, m_chargeLimitPercent);
+    // Re-evaluate immediately
+    if (enabled) enforceChargeLimit();
+}
+
+void BatteryMonitor::setChargeLimitPercent(int percent)
+{
+    percent = qBound(50, percent, 100);
+    if (percent == m_chargeLimitPercent) return;
+    m_chargeLimitPercent = percent;
+    qInfo() << "BatteryMonitor: Charge limit set to" << percent << "%";
+
+    saveSettings();
+    emit chargeLimitChanged(m_chargeLimitEnabled, m_chargeLimitPercent);
+    enforceChargeLimit();
+}
+
+void BatteryMonitor::enforceChargeLimit()
+{
+    if (!m_chargeLimitEnabled || m_inputSuspendPath.isEmpty()) return;
+
+    if (m_level >= m_chargeLimitPercent && !m_chargingSuspended) {
+        // Battery at or above limit — suspend charging
+        if (writeInputSuspend(true)) {
+            m_chargingSuspended = true;
+            qInfo() << "BatteryMonitor: Charge limit reached (" << m_level
+                    << "% >= " << m_chargeLimitPercent << "%), charging suspended";
+        }
+    } else if (m_level <= (m_chargeLimitPercent - CHARGE_LIMIT_HYSTERESIS) && m_chargingSuspended) {
+        // Battery dropped below hysteresis threshold — resume charging
+        if (writeInputSuspend(false)) {
+            m_chargingSuspended = false;
+            qInfo() << "BatteryMonitor: Below threshold (" << m_level
+                    << "% <= " << (m_chargeLimitPercent - CHARGE_LIMIT_HYSTERESIS)
+                    << "%), charging resumed";
+        }
+    }
+}
+
+bool BatteryMonitor::writeInputSuspend(bool suspend)
+{
+    QFile f(m_inputSuspendPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        qWarning() << "BatteryMonitor: Cannot open" << m_inputSuspendPath;
+        return false;
+    }
+    QByteArray val = suspend ? QByteArrayLiteral("1") : QByteArrayLiteral("0");
+    bool ok = (f.write(val) == val.size()) && f.flush();
+    if (!ok || f.error() != QFile::NoError) {
+        qWarning() << "BatteryMonitor: Failed to write" << val << "to" << m_inputSuspendPath;
+        return false;
+    }
+    return true;
+}
+
+void BatteryMonitor::loadSettings()
+{
+    QString path = m_configDir + QLatin1Char('/') + QLatin1String(POWERD_SETTINGS_FILE);
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return;
+
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    if (!doc.isObject()) return;
+
+    QJsonObject obj = doc.object();
+    QJsonObject cl = obj.value(QStringLiteral("charge_limit")).toObject();
+    m_chargeLimitEnabled = cl.value(QStringLiteral("enabled")).toBool(false);
+    m_chargeLimitPercent = qBound(50, cl.value(QStringLiteral("percent")).toInt(90), 100);
+
+    if (m_chargeLimitEnabled) {
+        qInfo() << "BatteryMonitor: Loaded charge limit:" << m_chargeLimitPercent << "% (enabled)";
+    }
+}
+
+void BatteryMonitor::saveSettings()
+{
+    QString path = m_configDir + QLatin1Char('/') + QLatin1String(POWERD_SETTINGS_FILE);
+
+    // Read existing settings to preserve other fields
+    QJsonObject obj;
+    {
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+            if (doc.isObject()) obj = doc.object();
+        }
+    }
+
+    QJsonObject cl;
+    cl[QStringLiteral("enabled")] = m_chargeLimitEnabled;
+    cl[QStringLiteral("percent")] = m_chargeLimitPercent;
+    obj[QStringLiteral("charge_limit")] = cl;
+
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "BatteryMonitor: Cannot save settings to" << path;
+        return;
+    }
+    f.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    f.commit();
 }

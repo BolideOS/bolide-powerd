@@ -21,6 +21,8 @@ public:
     SensorConfig currentConfig() const override;
     bool isAvailable(const QString &sensorName) const override;
     QStringList availableSensors() const override;
+    int lastHeartRate() const override;
+    qint64 lastStepCount() const override;
 
 private:
     struct SysfsNode {

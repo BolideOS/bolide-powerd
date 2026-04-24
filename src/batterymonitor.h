@@ -17,6 +17,8 @@ class BatteryMonitor : public QObject
     Q_PROPERTY(int learnedCapacityMah READ learnedCapacityMah NOTIFY healthChanged)
     Q_PROPERTY(int designCapacityMah READ designCapacityMah NOTIFY healthChanged)
     Q_PROPERTY(int cycleCount READ cycleCount NOTIFY healthChanged)
+    Q_PROPERTY(bool chargeLimitEnabled READ chargeLimitEnabled NOTIFY chargeLimitChanged)
+    Q_PROPERTY(int chargeLimitPercent READ chargeLimitPercent NOTIFY chargeLimitChanged)
 
     friend class TestBatteryMonitor;
     friend class TestDBusInterface;
@@ -39,6 +41,12 @@ public:
     int temperatureDeci() const;
     QString healthConfidence() const;
     QJsonObject healthInfo() const;
+
+    // Charge limit (battery protection)
+    bool chargeLimitEnabled() const;
+    int chargeLimitPercent() const;
+    void setChargeLimitEnabled(bool enabled);
+    void setChargeLimitPercent(int percent);
 
     struct BatteryEntry {
         qint64 timestamp;
@@ -67,14 +75,17 @@ signals:
     void chargingChanged(bool charging);
     void significantChange(int level, bool charging);
     void healthChanged();
+    void chargeLimitChanged(bool enabled, int percent);
 
 public slots:
     void setActiveProfile(const QString &profileId);
     void setWorkoutActive(bool active);
+    void onDisplayStateChanged(const QString &state);
 
 private slots:
     void pollBattery();
     void heartbeat();
+    void onUsbUnplugTimeout();
 
 private:
     void readBatteryLevel();
@@ -133,6 +144,26 @@ private:
     int m_coulombStartSoc;       // SoC% when accumulation started
     qint64 m_coulombLastMs;      // timestamp (ms) of last accumulation step
     int m_coulombEstimateCount;  // how many fallback estimates produced
+
+    // Charge limit (battery protection)
+    void enforceChargeLimit();
+    void loadSettings();
+    void saveSettings();
+    bool writeInputSuspend(bool suspend);
+    QString m_inputSuspendPath;  // sysfs path for input_suspend (empty = unavailable)
+    bool m_chargeLimitEnabled;
+    int m_chargeLimitPercent;    // 0-100, default 90
+    bool m_chargingSuspended;    // true when we've written input_suspend=1
+    static const int CHARGE_LIMIT_HYSTERESIS = 2; // resume charging at (limit - 2)%
+
+    // USB wakeup control — disable USB wakelock when cable unplugged
+    void setUsbWakeup(bool enabled);
+    QTimer *m_usbUnplugTimer;
+    bool m_usbWakeupDisabled;
+    static constexpr const char *USB_WAKEUP_PATH = "/sys/devices/platform/soc/78d9000.usb/power/wakeup";
+
+    // Screen state for adaptive polling
+    bool m_screenOn;
 };
 
 #endif // BATTERYMONITOR_H

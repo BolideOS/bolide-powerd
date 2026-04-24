@@ -23,6 +23,10 @@ public:
     virtual bool isAvailable(const QString &sensorName) const = 0;
     virtual QStringList availableSensors() const = 0;
 
+    // Read last sensor value (returns -1 if unavailable)
+    virtual int lastHeartRate() const = 0;
+    virtual qint64 lastStepCount() const = 0;
+
 signals:
     void sensorError(const QString &sensorName, const QString &error);
 };

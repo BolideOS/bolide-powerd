@@ -6,10 +6,13 @@
 #include <QJsonParseError>
 #include <QDebug>
 
-DBusInterface::DBusInterface(ProfileManager *pm, BatteryMonitor *bm)
+DBusInterface::DBusInterface(ProfileManager *pm, BatteryMonitor *bm,
+                             HealthMonitor *hm, HealthStore *hs)
     : QDBusAbstractAdaptor(pm)
     , m_profileManager(pm)
     , m_batteryMonitor(bm)
+    , m_healthMonitor(hm)
+    , m_healthStore(hs)
     , m_workoutActive(false)
 {
     // Connect ProfileManager signals to D-Bus signals
@@ -26,6 +29,14 @@ DBusInterface::DBusInterface(ProfileManager *pm, BatteryMonitor *bm)
                 m_batteryMonitor->learnedCapacityMah(),
                 m_batteryMonitor->designCapacityMah());
         });
+        connect(m_batteryMonitor, &BatteryMonitor::chargeLimitChanged,
+                this, &DBusInterface::ChargeLimitChanged);
+    }
+
+    // Forward health monitor signals
+    if (m_healthMonitor) {
+        connect(m_healthMonitor, &HealthMonitor::healthDataUpdated,
+                this, &DBusInterface::HealthDataUpdated);
     }
 }
 
@@ -202,6 +213,7 @@ bool DBusInterface::StartWorkout(const QString &workoutType)
     }
     
     m_workoutActive = true;
+    if (m_healthMonitor) m_healthMonitor->setWorkoutActive(true);
     m_profileManager->saveProfiles();
     
     emit WorkoutStarted(workoutType, profileId);
@@ -226,6 +238,7 @@ bool DBusInterface::StopWorkout()
     }
     
     m_workoutActive = false;
+    if (m_healthMonitor) m_healthMonitor->setWorkoutActive(false);
     QString workoutType = m_activeWorkoutType;
     m_activeWorkoutType.clear();
     m_previousProfileId.clear();
@@ -324,6 +337,8 @@ QString DBusInterface::GetCurrentState()
         battery[QLatin1String("design_capacity_mah")] = m_batteryMonitor->designCapacityMah();
         battery[QLatin1String("cycle_count")] = m_batteryMonitor->cycleCount();
         battery[QLatin1String("health_confidence")] = m_batteryMonitor->healthConfidence();
+        battery[QLatin1String("charge_limit_enabled")] = m_batteryMonitor->chargeLimitEnabled();
+        battery[QLatin1String("charge_limit_percent")] = m_batteryMonitor->chargeLimitPercent();
     }
     state[QLatin1String("battery")] = battery;
 
@@ -477,4 +492,105 @@ void DBusInterface::applySensorMode(const QString &sensorName)
         qDebug() << "applySensorMode:" << sensorName
                  << "→ no grants, profile-based mode";
     }
+}
+
+// ─── Charge limit ───────────────────────────────────────────────────────────
+
+bool DBusInterface::GetChargeLimitEnabled()
+{
+    return m_batteryMonitor ? m_batteryMonitor->chargeLimitEnabled() : false;
+}
+
+int DBusInterface::GetChargeLimitPercent()
+{
+    return m_batteryMonitor ? m_batteryMonitor->chargeLimitPercent() : 90;
+}
+
+bool DBusInterface::SetChargeLimitEnabled(bool enabled)
+{
+    if (!m_batteryMonitor) return false;
+    m_batteryMonitor->setChargeLimitEnabled(enabled);
+    return true;
+}
+
+bool DBusInterface::SetChargeLimitPercent(int percent)
+{
+    if (!m_batteryMonitor) return false;
+    if (percent < 50 || percent > 100) return false;
+    m_batteryMonitor->setChargeLimitPercent(percent);
+    return true;
+}
+
+// ═══ Health monitoring ═══
+
+QString DBusInterface::GetHealthSettings()
+{
+    if (!m_healthMonitor) return QStringLiteral("{}");
+    QJsonDocument doc(m_healthMonitor->settings().toJson());
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
+bool DBusInterface::SetHealthSettings(const QString &settingsJson)
+{
+    if (!m_healthMonitor) return false;
+    QJsonParseError err;
+    QJsonDocument doc = QJsonDocument::fromJson(settingsJson.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError) {
+        qWarning() << "SetHealthSettings: JSON parse error:" << err.errorString();
+        return false;
+    }
+    HealthSettings settings = HealthSettings::fromJson(doc.object());
+    m_healthMonitor->setSettings(settings);
+    emit HealthSettingsChanged(settingsJson);
+    return true;
+}
+
+QString DBusInterface::GetHealthData(const QString &metric, qint64 fromTs, qint64 toTs)
+{
+    if (!m_healthStore) return QStringLiteral("[]");
+
+    // Open DB for reading, query, close
+    bool wasOpen = m_healthStore->isOpen();
+    if (!wasOpen) m_healthStore->open();
+
+    QJsonArray data = m_healthStore->querySamples(metric, fromTs, toTs);
+
+    if (!wasOpen) m_healthStore->close();
+
+    QJsonDocument doc(data);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
+QString DBusInterface::GetHealthDataAggregated(const QString &metric, qint64 fromTs,
+                                               qint64 toTs, int bucketMinutes)
+{
+    if (!m_healthStore) return QStringLiteral("[]");
+    if (bucketMinutes < 1) bucketMinutes = 60;
+
+    bool wasOpen = m_healthStore->isOpen();
+    if (!wasOpen) m_healthStore->open();
+
+    QJsonArray data = m_healthStore->queryAggregated(metric, fromTs, toTs, bucketMinutes);
+
+    if (!wasOpen) m_healthStore->close();
+
+    QJsonDocument doc(data);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
+}
+
+QString DBusInterface::GetHealthLatest(const QString &metric, int count)
+{
+    if (!m_healthStore) return QStringLiteral("[]");
+    if (count < 1) count = 1;
+    if (count > 100) count = 100;
+
+    bool wasOpen = m_healthStore->isOpen();
+    if (!wasOpen) m_healthStore->open();
+
+    QJsonArray data = m_healthStore->queryLatest(metric, count);
+
+    if (!wasOpen) m_healthStore->close();
+
+    QJsonDocument doc(data);
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Compact));
 }

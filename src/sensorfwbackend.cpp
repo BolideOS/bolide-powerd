@@ -3,6 +3,7 @@
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDBusArgument>
 #include <QDBusError>
 #include <QTime>
 #include <QDebug>
@@ -23,6 +24,7 @@ SensorFwBackend::SensorFwBackend(QObject *parent)
 
     // GPS periodic timer setup
     m_gpsPeriodicTimer->setInterval(60000); // 60 seconds cycle
+    m_gpsPeriodicTimer->setTimerType(Qt::CoarseTimer);
     connect(m_gpsPeriodicTimer, &QTimer::timeout, this, &SensorFwBackend::onGpsTimerTick);
 
     // Initialize SensorFW connection
@@ -97,6 +99,15 @@ bool SensorFwBackend::applyConfig(const SensorConfig &config)
     success &= setAmbientLightMode(config.ambient_light);
     success &= setGpsMode(config.gps);
 
+    // Step counter: start/stop alongside accelerometer (steps derived from accel)
+    const QString stepSensorId = QStringLiteral("stepcountersensor");
+    if (config.accelerometer != SensorMode::Off) {
+        // 5-minute polling for step count reads
+        startSensor(stepSensorId, 300000);
+    } else {
+        stopSensor(stepSensorId);
+    }
+
     // Update current config
     m_currentConfig = config;
 
@@ -155,6 +166,92 @@ bool SensorFwBackend::isAvailable(const QString &sensorName) const
 QStringList SensorFwBackend::availableSensors() const
 {
     return m_availableSensors;
+}
+
+int SensorFwBackend::lastHeartRate() const
+{
+    const QString sensorId = QStringLiteral("heartrate");
+    if (!m_activeSensors.contains(sensorId))
+        return -1;
+
+    const SensorSession &sess = m_activeSensors[sensorId];
+    if (!sess.interface || !sess.interface->isValid() || !sess.running)
+        return -1;
+
+    // SensorFW exposes last reading via the "reading" property on the sensor session
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("local.SensorManager"),
+        sess.interface->path(),
+        QStringLiteral("local.heartrate"),
+        QStringLiteral("reading"));
+    QDBusMessage reply = QDBusConnection::systemBus().call(msg, QDBus::Block, 500);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        qDebug() << "Failed to read heartrate:" << reply.errorMessage();
+        return -1;
+    }
+
+    // SensorFW heartrate reading returns (unsigned, {timestamp, bpm})
+    // Try to extract BPM from the reply arguments
+    if (reply.arguments().isEmpty())
+        return -1;
+
+    // The reply format depends on the SensorFW version/adaptor.
+    // hybrishrmadaptor typically returns a struct with timestamp + bpm.
+    // Try extracting as int directly first, then dig into structs.
+    QVariant arg = reply.arguments().first();
+    if (arg.canConvert<int>()) {
+        int bpm = arg.toInt();
+        return (bpm > 0 && bpm <= 300) ? bpm : -1;
+    }
+
+    // Try as QDBusArgument (complex type)
+    if (arg.canConvert<QDBusArgument>()) {
+        QDBusArgument dbusArg = arg.value<QDBusArgument>();
+        dbusArg.beginStructure();
+        quint64 timestamp;
+        int bpm;
+        dbusArg >> timestamp >> bpm;
+        dbusArg.endStructure();
+        return (bpm > 0 && bpm <= 300) ? bpm : -1;
+    }
+
+    return -1;
+}
+
+qint64 SensorFwBackend::lastStepCount() const
+{
+    // Step counter in SensorFW is software-derived from accelerometer.
+    // It may not be available as a separate sensor.
+    // Try reading from stepcountersensor if it has a session.
+    const QString sensorId = QStringLiteral("stepcountersensor");
+    if (!m_activeSensors.contains(sensorId))
+        return -1;
+
+    const SensorSession &sess = m_activeSensors[sensorId];
+    if (!sess.interface || !sess.interface->isValid() || !sess.running)
+        return -1;
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("local.SensorManager"),
+        sess.interface->path(),
+        QStringLiteral("local.stepcountersensor"),
+        QStringLiteral("reading"));
+    QDBusMessage reply = QDBusConnection::systemBus().call(msg, QDBus::Block, 500);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        qDebug() << "Failed to read step counter:" << reply.errorMessage();
+        return -1;
+    }
+
+    if (reply.arguments().isEmpty())
+        return -1;
+
+    QVariant arg = reply.arguments().first();
+    if (arg.canConvert<qint64>())
+        return arg.toLongLong();
+    if (arg.canConvert<int>())
+        return arg.toInt();
+
+    return -1;
 }
 
 bool SensorFwBackend::setAccelerometerMode(SensorMode mode)

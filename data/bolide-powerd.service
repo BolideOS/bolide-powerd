@@ -1,6 +1,7 @@
 [Unit]
 Description=BolideOS Power Manager Daemon
-After=dbus.service
+After=dbus.service bluetooth.service
+Wants=bluetooth.service
 
 [Service]
 Type=dbus

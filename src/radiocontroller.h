@@ -49,7 +49,8 @@ private:
     QDBusInterface *m_bluezAdapter;
     QDBusInterface *m_bluezProperties;
     QDBusInterface *m_connmanManager;
-    QDBusInterface *m_connmanTechnology;
+    QDBusInterface *m_connmanTechnology;      // WiFi
+    QDBusInterface *m_connmanBtTechnology;    // Bluetooth
     QDBusInterface *m_neardManager;
     
     QTimer *m_syncTimer;
